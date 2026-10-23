@@ -1,0 +1,74 @@
+{
+  "name": "CDM Browser Extension",
+  "version": "0.7.1",
+  "description": "Easily send download links to the CDM app and skip browser downloads. Enjoy advanced features like pause, resume, scheduling, and faster speeds for a smarter downloading experience. Simplify your workflow today!",
+  "manifest_version": 3,
+  "author": "Adel Bakhshi",
+  "homepage_url": "https://cdmapp.netlify.app/",
+  "host_permissions": [
+    "*://*/*",
+    "http://localhost:5000/*"
+  ],
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {},
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "exclude_matches": [
+        "*://*.google.com/*",
+        "*://*.youtube.com/*",
+        "*://*.youtu.be/*",
+        "*://*.vimeo.com/*",
+        "*://*.netflix.com/*",
+        "*://*.amazon.com/*",
+        "*://*.hulu.com/*",
+        "*://*.twitch.tv/*",
+        "*://*.dailymotion.com/*",
+        "*://*.disneyplus.com/*",
+        "*://*.hbomax.com/*"
+      ],
+      "css": [
+        "content_scripts/content-0.css"
+      ],
+      "js": [
+        "content_scripts/content-0.js"
+      ]
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "templates/popup-template.html"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    },
+    {
+      "resources": [
+        "templates/list-item-template.html"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ],
+  "permissions": [
+    "downloads",
+    "storage",
+    "scripting",
+    "contextMenus",
+    "alarms",
+    "notifications"
+  ],
+  "background": {
+    "service_worker": "background/service_worker.js"
+  }
+}

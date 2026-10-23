@@ -33,8 +33,22 @@ def _get_downloads_dir() -> str:
     return downloads
 
 
-# Default base directory: <Downloads>/downloader
-_DEFAULT_BASE = os.path.join(_get_downloads_dir(), "downloader")
+def _get_base_storage_dir() -> str:
+    r"""
+    Get the default storage directory for downloads.
+    Prioritizes the dedicated ~/downloader folder (e.g. C:\Users\<user>\downloader),
+    falling back to <Downloads>/downloader if needed.
+    """
+    home = os.path.expanduser("~")
+    user_downloader = os.path.join(home, "downloader")
+    if os.path.exists(user_downloader):
+        return user_downloader
+    return os.path.join(_get_downloads_dir(), "downloader")
+
+
+# Default base directory: ~/downloader (fallback to <Downloads>/downloader)
+_DEFAULT_BASE = _get_base_storage_dir()
+
 
 
 class Quality(Enum):
@@ -95,6 +109,7 @@ class Platform(Enum):
     TWITCH = "Twitch"
     SOUNDCLOUD = "SoundCloud"
     DAILYMOTION = "Dailymotion"
+    CRUNCHYROLL = "Crunchyroll"
     UNKNOWN = "Unknown"
 
 
@@ -128,13 +143,6 @@ class Config:
     REQUEST_TIMEOUT: int = 30
     DOWNLOAD_TIMEOUT: int = 7200
     MIN_FREE_SPACE_MB: int = 500
-    
-    # Bot settings
-    USE_BOT_MODULE: bool = False
-    RATE_LIMIT_REQUESTS_PER_MIN: int = 30
-    ENABLE_PROXY: bool = False
-    PROXY_URL: Optional[str] = None
-    HEADLESS_BROWSER: bool = True
     
     # File settings
     MAX_FILENAME_LENGTH: int = 200
@@ -172,12 +180,45 @@ class Config:
     # Preview before download
     PREVIEW_BEFORE_DOWNLOAD: bool = True
     
+    # Chunked downloader settings
+    FILES_DIR: str = os.path.join(_DEFAULT_BASE, "files")
+    STREAM_DIR: str = os.path.join(_DEFAULT_BASE, "streams")
+    DOWNLOAD_THREADS: int = 8              # Parallel chunks per file
+    CHUNK_SIZE_MB: int = 10                # Minimum chunk size in MB
+    MAX_DOWNLOAD_THREADS: int = 32         # Max threads for AI acceleration
+    SPEED_LIMIT_KBPS: int = 0              # 0 = unlimited, else KB/s
+    AI_ACCELERATION: bool = True           # Dynamic thread tuning + work stealing
+    
+    # SpotiFLAC / Lossless Music settings
+    MUSIC_DIR: str = os.path.join(_DEFAULT_BASE, "music")
+    MUSIC_QUALITY: str = "flac"            # "flac" (lossless) or "320k" (high bitrate MP3)
+    EMBED_LYRICS: bool = True              # Embed synchronized / plain lyrics in audio metadata
+    SAVE_LRC_FILE: bool = True             # Save .lrc synchronized lyrics file alongside audio
+    SAVE_COVER_ART: bool = True            # Save high-res cover art alongside audio
+    
+    # ML training data logger
+    ML_LOG_PATH: str = os.path.join(_DEFAULT_BASE, "ml_training.jsonl")
+    ML_LOG_ENABLED: bool = True             # Collect structured telemetry for ML
+
+    # CrossPlatformDownloadManager (CDM) Settings
+    CDM_ENABLED: bool = True
+    CDM_DIR: str = os.path.join(_DEFAULT_BASE, "cdm")
+    CDM_AUTO_START: bool = True
+    CDM_DEFAULT_QUEUE: str = "Main Queue"
+    CDM_DUPLICATE_ACTION: str = "duplicate_number"  # "duplicate_number", "overwrite", "resume", "let_user_choose"
+    CDM_PORT: int = 5000
+
+    # Universal Media / Webpage Sniffer Settings
+    UNKNOWN_DIR: str = os.path.join(_DEFAULT_BASE, "unknown")
+    
     @classmethod
     def init_directories(cls) -> bool:
         dirs = [
             cls.BASE_DIR, cls.VIDEO_DIR, cls.AUDIO_DIR,
             cls.IMAGE_DIR, cls.TEXT_DIR, cls.SUBTITLE_DIR,
-            cls.THUMBNAIL_DIR, cls.TEMP_DIR, cls.COOKIE_DIR
+            cls.THUMBNAIL_DIR, cls.TEMP_DIR, cls.COOKIE_DIR,
+            cls.FILES_DIR, cls.STREAM_DIR, cls.MUSIC_DIR,
+            cls.CDM_DIR, cls.UNKNOWN_DIR,
         ]
         try:
             for d in dirs:
@@ -198,7 +239,8 @@ class Config:
             "Subtitles": cls.SUBTITLE_DIR,
             "Thumbnails": cls.THUMBNAIL_DIR,
             "Temp": cls.TEMP_DIR,
-            "Cookies": cls.COOKIE_DIR
+            "Cookies": cls.COOKIE_DIR,
+            "Unknown": cls.UNKNOWN_DIR
         }
         results = {}
         for name, path in dirs.items():
@@ -235,6 +277,11 @@ class Config:
             "thumbnail_dir": cls.THUMBNAIL_DIR,
             "subtitle_dir": cls.SUBTITLE_DIR,
             "text_dir": cls.TEXT_DIR,
+            "unknown_dir": cls.UNKNOWN_DIR,
+            "cdm_dir": cls.CDM_DIR,
+            "music_dir": cls.MUSIC_DIR,
+            "files_dir": cls.FILES_DIR,
+            "stream_dir": cls.STREAM_DIR,
             "default_video_quality": cls.DEFAULT_VIDEO_QUALITY.value,
             "default_audio_quality": cls.DEFAULT_AUDIO_QUALITY.value,
             "default_video_format": cls.DEFAULT_VIDEO_FORMAT.value,
@@ -243,7 +290,6 @@ class Config:
             "embed_thumbnail": cls.EMBED_THUMBNAIL,
             "embed_metadata": cls.EMBED_METADATA,
             "organize_by_platform": cls.ORGANIZE_BY_PLATFORM,
-            "use_bot_module": cls.USE_BOT_MODULE,
             "subtitle_languages": cls.SUBTITLE_LANGUAGES,
         }
         try:
@@ -272,13 +318,21 @@ class Config:
                 cls.TEXT_DIR = settings.get("text_dir", os.path.join(base, "text"))
                 cls.SUBTITLE_DIR = settings.get("subtitle_dir", os.path.join(base, "subtitles"))
                 cls.THUMBNAIL_DIR = settings.get("thumbnail_dir", os.path.join(base, "thumbnails"))
+                cls.UNKNOWN_DIR = settings.get("unknown_dir", os.path.join(base, "unknown"))
+                cls.FILES_DIR = settings.get("files_dir", os.path.join(base, "files"))
+                cls.STREAM_DIR = settings.get("stream_dir", os.path.join(base, "streams"))
+                cls.MUSIC_DIR = settings.get("music_dir", os.path.join(base, "music"))
+                cls.CDM_DIR = settings.get("cdm_dir", os.path.join(base, "cdm"))
                 cls.TEMP_DIR = os.path.join(base, "temp")
                 cls.COOKIE_DIR = os.path.join(base, "cookies")
                 cls.DATABASE_PATH = os.path.join(base, "downloader.db")
                 cls.LOG_PATH = os.path.join(base, "downloader.log")
                 cls.DOWNLOAD_ARCHIVE = os.path.join(base, "download_archive.txt")
+                cls.ML_LOG_PATH = os.path.join(base, "ml_training.jsonl")
             else:
                 # Load individual dirs if present (without base_dir override)
+                if "unknown_dir" in settings:
+                    cls.UNKNOWN_DIR = settings["unknown_dir"]
                 if "video_dir" in settings:
                     cls.VIDEO_DIR = settings["video_dir"]
                 if "audio_dir" in settings:
@@ -289,6 +343,10 @@ class Config:
                     cls.SUBTITLE_DIR = settings["subtitle_dir"]
                 if "text_dir" in settings:
                     cls.TEXT_DIR = settings["text_dir"]
+                if "cdm_dir" in settings:
+                    cls.CDM_DIR = settings["cdm_dir"]
+                if "music_dir" in settings:
+                    cls.MUSIC_DIR = settings["music_dir"]
             if "max_concurrent_downloads" in settings:
                 cls.MAX_CONCURRENT_DOWNLOADS = settings["max_concurrent_downloads"]
             if "embed_thumbnail" in settings:
@@ -297,14 +355,13 @@ class Config:
                 cls.EMBED_METADATA = settings["embed_metadata"]
             if "organize_by_platform" in settings:
                 cls.ORGANIZE_BY_PLATFORM = settings["organize_by_platform"]
-            if "use_bot_module" in settings:
-                cls.USE_BOT_MODULE = settings["use_bot_module"]
             if "subtitle_languages" in settings:
                 cls.SUBTITLE_LANGUAGES = settings["subtitle_languages"]
             return True
         except Exception as e:
             print(f"Error loading settings: {e}")
             return False
+
     
     @classmethod
     def get_free_space_mb(cls) -> int:
@@ -368,59 +425,11 @@ AUDIO_FORMAT_MAP = {
     AudioFormat.OGG: "vorbis",
 }
 
-# Platform URL patterns
-PLATFORM_PATTERNS = {
-    Platform.YOUTUBE: [
-        r"(?:https?://)?(?:www\.)?youtube\.com/watch\?v=",
-        r"(?:https?://)?(?:www\.)?youtube\.com/playlist\?list=",
-        r"(?:https?://)?(?:www\.)?youtube\.com/shorts/",
-        r"(?:https?://)?youtu\.be/",
-        r"(?:https?://)?(?:www\.)?youtube\.com/embed/",
-        r"(?:https?://)?(?:www\.)?youtube\.com/v/",
-        r"(?:https?://)?(?:www\.)?youtube\.com/@[\w-]+",
-        r"(?:https?://)?(?:www\.)?youtube\.com/channel/",
-    ],
-    Platform.INSTAGRAM: [
-        r"(?:https?://)?(?:www\.)?instagram\.com/p/",
-        r"(?:https?://)?(?:www\.)?instagram\.com/reel/",
-        r"(?:https?://)?(?:www\.)?instagram\.com/reels/",
-        r"(?:https?://)?(?:www\.)?instagram\.com/tv/",
-        r"(?:https?://)?(?:www\.)?instagram\.com/stories/",
-    ],
-    Platform.TWITTER: [
-        r"(?:https?://)?(?:www\.)?twitter\.com/\w+/status/",
-        r"(?:https?://)?(?:www\.)?x\.com/\w+/status/",
-    ],
-    Platform.FACEBOOK: [
-        r"(?:https?://)?(?:www\.)?facebook\.com/.+/videos/",
-        r"(?:https?://)?(?:www\.)?facebook\.com/watch/",
-        r"(?:https?://)?(?:www\.)?facebook\.com/reel/",
-        r"(?:https?://)?(?:www\.)?fb\.watch/",
-    ],
-    Platform.REDDIT: [
-        r"(?:https?://)?(?:www\.)?reddit\.com/r/\w+/comments/",
-        r"(?:https?://)?v\.redd\.it/",
-    ],
-    Platform.TIKTOK: [
-        r"(?:https?://)?(?:www\.)?tiktok\.com/@[\w.]+/video/",
-        r"(?:https?://)?(?:vm\.)?tiktok\.com/",
-    ],
-    Platform.VIMEO: [
-        r"(?:https?://)?(?:www\.)?vimeo\.com/\d+",
-    ],
-    Platform.TWITCH: [
-        r"(?:https?://)?(?:www\.)?twitch\.tv/\w+/clip/",
-        r"(?:https?://)?(?:www\.)?twitch\.tv/videos/",
-        r"(?:https?://)?clips\.twitch\.tv/",
-    ],
-    Platform.SOUNDCLOUD: [
-        r"(?:https?://)?(?:www\.)?soundcloud\.com/[\w-]+/[\w-]+",
-    ],
-    Platform.DAILYMOTION: [
-        r"(?:https?://)?(?:www\.)?dailymotion\.com/video/",
-        r"(?:https?://)?dai\.ly/",
-    ],
-}
+# Platform URL patterns (centralized in platforms.py)
+try:
+    from platforms import PLATFORM_PATTERNS
+except ImportError:
+    PLATFORM_PATTERNS = {}
 
 
 # Auto-load saved settings on import so user preferences are always applied

@@ -8,7 +8,7 @@ import json
 import threading
 from datetime import datetime
 from dataclasses import dataclass
-from typing import Optional, Dict, List, Any, Tuple
+from typing import Optional, Dict, List, Any, Tuple, Union, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
@@ -41,15 +41,24 @@ def _get_clipboard_url() -> Optional[str]:
 # DESKTOP NOTIFICATION HELPER (Windows)
 # ============================================================================
 
-def _send_notification(title: str, message: str):
-    """Send a Windows toast notification. Best-effort, never raises."""
+def _send_notification(title: str, message: str, filepath: str = None):
+    """Send a Windows toast notification with optional click-to-open-folder. Best-effort, never raises."""
     try:
-        # Try PowerShell toast (works on all Windows 10/11)
         import subprocess
+        # Build the launch action XML if filepath is provided
+        launch_attr = ''
+        if filepath:
+            folder = os.path.dirname(filepath).replace("'", "''")
+            launch_attr = f" activationType='protocol' launch='file:///{folder}'"
+        
+        # Escape XML-sensitive characters in title and message
+        safe_title = str(title).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        safe_msg = str(message).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        
         ps_script = f'''
 [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
 [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime] | Out-Null
-$template = @"<toast><visual><binding template='ToastText02'><text id='1'>{title}</text><text id='2'>{message}</text></binding></visual></toast>"@
+$template = @"<toast{launch_attr}><visual><binding template='ToastText02'><text id='1'>{safe_title}</text><text id='2'>{safe_msg}</text></binding></visual></toast>"@
 $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
 $xml.LoadXml($template)
 $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
@@ -92,305 +101,91 @@ except ImportError:
 # IMPORT LOCAL MODULES
 # ============================================================================
 
-try:
-    from config import Config
-    CONFIG_AVAILABLE = True
-except ImportError:
-    CONFIG_AVAILABLE = False
-    print("[ERROR] config.py not found")
+from config import Config
+CONFIG_AVAILABLE = True
+
+from database import DatabaseManager, DownloadRecord, DownloadStatus
+DATABASE_AVAILABLE = True
+
+from platforms import (
+    Platform, detect_platform, get_platform_info,
+    extract_video_id, is_playlist_url, detect_content_type,
+    ContentType, normalize_url, is_supported_url
+)
+PLATFORMS_AVAILABLE = True
+
+from quality_manager import (
+    QualityManager, QualitySelector, QualityPreset,
+    VideoResolution, AudioCodec, AudioBitrate
+)
+QUALITY_AVAILABLE = True
+
+from utils import (
+    sanitize_filename, format_size, format_duration,
+    check_ffmpeg, get_free_space_mb, find_file,
+    clear_screen, get_logger, ensure_directory,
+    ProgressTracker, is_valid_url
+)
+UTILS_AVAILABLE = True
 
 try:
-    from database import DatabaseManager, DownloadRecord, DownloadStatus
-    DATABASE_AVAILABLE = True
+    from chunked_downloader import ChunkedDownloader, probe_url, quick_download
+    CHUNKED_AVAILABLE = True
 except ImportError:
-    DATABASE_AVAILABLE = False
-    print("[WARNING] database.py not found - using basic tracking")
+    CHUNKED_AVAILABLE = False
 
 try:
-    from platforms import (
-        Platform, detect_platform, get_platform_info,
-        extract_video_id, is_playlist_url, detect_content_type,
-        ContentType, normalize_url, is_supported_url
+    from stream_recorder import M3U8Downloader, M3U8Parser, is_m3u8_url, is_stream_url
+    STREAM_AVAILABLE = True
+except ImportError:
+    STREAM_AVAILABLE = False
+
+try:
+    from github_releases import GitHubReleaseParser, download_github_release
+    GITHUB_AVAILABLE = True
+except ImportError:
+    GITHUB_AVAILABLE = False
+
+try:
+    from ml_logger import get_ml_logger, url_hash
+    ML_LOGGER_AVAILABLE = True
+except ImportError:
+    ML_LOGGER_AVAILABLE = False
+
+try:
+    from subtitle_ai import (
+        detect_user_language, recommend_languages,
+        get_recommendation_label, SubtitleCleaner, clean_subtitle_file
     )
-    PLATFORMS_AVAILABLE = True
+    SUBTITLE_AI_AVAILABLE = True
 except ImportError:
-    PLATFORMS_AVAILABLE = False
-    print("[WARNING] platforms.py not found - using basic detection")
+    SUBTITLE_AI_AVAILABLE = False
 
 try:
-    from quality_manager import (
-        QualityManager, QualitySelector, QualityPreset,
-        VideoResolution, AudioCodec, AudioBitrate
+    from spotiflac import (
+        SpotiFLACDownloader, SpotifyMetadataResolver,
+        SpotifyTrack, SpotifyCollection
     )
-    QUALITY_AVAILABLE = True
+    SPOTIFLAC_AVAILABLE = True
 except ImportError:
-    QUALITY_AVAILABLE = False
-    print("[WARNING] quality_manager.py not found - using default quality")
+    SPOTIFLAC_AVAILABLE = False
 
 try:
-    from utils import (
-        sanitize_filename, format_size, format_duration,
-        check_ffmpeg, get_free_space_mb, find_file,
-        clear_screen, get_logger, ensure_directory,
-        ProgressTracker, is_valid_url
+    from search_engine import MediaSearchEngine, SearchResultItem
+    SEARCH_ENGINE_AVAILABLE = True
+except ImportError:
+    SEARCH_ENGINE_AVAILABLE = False
+
+CDM_AVAILABLE = False
+
+try:
+    from universal_downloader import (
+        UniversalMediaDownloader, WebpageStreamSniffer, StreamCandidate
     )
-    UTILS_AVAILABLE = True
+    UNIVERSAL_AVAILABLE = True
 except ImportError:
-    UTILS_AVAILABLE = False
-    print("[WARNING] utils.py not found - using basic utilities")
+    UNIVERSAL_AVAILABLE = False
 
-# Optional bot module
-try:
-    from bot import BotSession, StealthBrowser, CookieManager
-    BOT_AVAILABLE = True
-except ImportError:
-    BOT_AVAILABLE = False
-
-# ============================================================================
-# FALLBACK IMPLEMENTATIONS (if modules not available)
-# ============================================================================
-
-if not CONFIG_AVAILABLE:
-    # Dynamic path resolution for fallback Config
-    _home = os.path.expanduser("~")
-    _dl_base = os.path.join(_home, "Downloads", "downloader")
-    
-    class Config:
-        BASE_DIR = _dl_base
-        VIDEO_DIR = os.path.join(_dl_base, "videos")
-        AUDIO_DIR = os.path.join(_dl_base, "audios")
-        THUMBNAIL_DIR = os.path.join(_dl_base, "thumbnails")
-        SUBTITLE_DIR = os.path.join(_dl_base, "subtitles")
-        TEMP_DIR = os.path.join(_dl_base, "temp")
-        DATABASE_PATH = os.path.join(_dl_base, "downloader.db")
-        LOG_PATH = os.path.join(_dl_base, "downloader.log")
-        EMBED_THUMBNAIL = True
-        EMBED_METADATA = True
-        ORGANIZE_BY_PLATFORM = True
-        ORGANIZE_BY_PLAYLIST = True
-        SUBTITLE_LANGUAGES = ["en", "es", "fr", "de", "it", "ja", "ko", "ru", "pt", "hi", "zh"]
-        MAX_FILENAME_LENGTH = 200
-        RETRY_ATTEMPTS = 3
-        
-        @classmethod
-        def init_directories(cls):
-            for d in [cls.BASE_DIR, cls.VIDEO_DIR, cls.AUDIO_DIR, 
-                      cls.THUMBNAIL_DIR, cls.SUBTITLE_DIR, cls.TEMP_DIR]:
-                os.makedirs(d, exist_ok=True)
-
-if not PLATFORMS_AVAILABLE:
-    import re
-    from enum import Enum
-    
-    class Platform(Enum):
-        YOUTUBE = "YouTube"
-        INSTAGRAM = "Instagram"
-        TWITTER = "Twitter"
-        FACEBOOK = "Facebook"
-        REDDIT = "Reddit"
-        TIKTOK = "TikTok"
-        VIMEO = "Vimeo"
-        TWITCH = "Twitch"
-        SOUNDCLOUD = "SoundCloud"
-        UNKNOWN = "Unknown"
-    
-    class ContentType(Enum):
-        VIDEO = "video"
-        AUDIO = "audio"
-        PLAYLIST = "playlist"
-        UNKNOWN = "unknown"
-    
-    def detect_platform(url):
-        url = url.lower()
-        if "youtube" in url or "youtu.be" in url:
-            return Platform.YOUTUBE
-        elif "instagram" in url:
-            return Platform.INSTAGRAM
-        elif "twitter" in url or "x.com" in url:
-            return Platform.TWITTER
-        elif "facebook" in url or "fb.watch" in url:
-            return Platform.FACEBOOK
-        elif "reddit" in url or "redd.it" in url:
-            return Platform.REDDIT
-        elif "tiktok" in url:
-            return Platform.TIKTOK
-        elif "vimeo" in url:
-            return Platform.VIMEO
-        elif "twitch" in url:
-            return Platform.TWITCH
-        elif "soundcloud" in url:
-            return Platform.SOUNDCLOUD
-        return Platform.UNKNOWN
-    
-    def is_playlist_url(url):
-        return "playlist" in url.lower() or "list=" in url.lower()
-    
-    def detect_content_type(url, platform=None):
-        if is_playlist_url(url):
-            return ContentType.PLAYLIST
-        return ContentType.VIDEO
-    
-    def normalize_url(url):
-        return url.strip()
-    
-    def is_supported_url(url):
-        return detect_platform(url) != Platform.UNKNOWN
-
-if not UTILS_AVAILABLE:
-    import re
-    import shutil
-    import subprocess
-    import logging
-    
-    def sanitize_filename(name, max_length=200):
-        if not name:
-            return "untitled"
-        for c in '<>:"/\\|?*':
-            name = name.replace(c, '_')
-        name = ''.join(c for c in name if ord(c) >= 32)
-        name = name.encode('ascii', 'ignore').decode('ascii')
-        name = re.sub(r'[_\s]+', ' ', name).strip()
-        return name[:max_length] if name else "untitled"
-    
-    def format_size(size):
-        if not size or size < 0:
-            return "Unknown"
-        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-            if size < 1024:
-                return f"{size:.2f} {unit}"
-            size /= 1024
-        return f"{size:.2f} PB"
-    
-    def format_duration(seconds):
-        if not seconds or seconds < 0:
-            return "00:00"
-        h, m, s = int(seconds // 3600), int((seconds % 3600) // 60), int(seconds % 60)
-        return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
-    
-    def check_ffmpeg():
-        try:
-            r = subprocess.run(['ffmpeg', '-version'], capture_output=True)
-            return r.returncode == 0
-        except:
-            return False
-    
-    def get_free_space_mb(path):
-        try:
-            _, _, free = shutil.disk_usage(path)
-            return free // (1024 * 1024)
-        except:
-            return -1
-    
-    def find_file(directory, name_contains, extensions=None):
-        if not os.path.exists(directory):
-            return None
-        extensions = extensions or ['.mp4', '.mkv', '.webm', '.mp3', '.m4a']
-        for f in sorted(os.listdir(directory), key=lambda x: os.path.getmtime(os.path.join(directory, x)), reverse=True):
-            fp = os.path.join(directory, f)
-            if os.path.isfile(fp):
-                _, ext = os.path.splitext(f)
-                if ext.lower() in extensions:
-                    if name_contains and name_contains[:20].lower() in f.lower():
-                        return fp
-        return None
-    
-    def clear_screen():
-        os.system('cls' if os.name == 'nt' else 'clear')
-    
-    def get_logger():
-        return logging.getLogger("downloader")
-    
-    def ensure_directory(path):
-        os.makedirs(path, exist_ok=True)
-        return True
-    
-    def is_valid_url(url):
-        return url.startswith(('http://', 'https://'))
-    
-    class ProgressTracker:
-        def __init__(self, total=0):
-            self.total = total
-            self.current = 0
-
-if not DATABASE_AVAILABLE:
-    class DownloadRecord:
-        def __init__(self, **kwargs):
-            for k, v in kwargs.items():
-                setattr(self, k, v)
-    
-    class DownloadStatus:
-        COMPLETE = "complete"
-        FAILED = "failed"
-        PENDING = "pending"
-    
-    class DatabaseManager:
-        def __init__(self, *args, **kwargs):
-            self._downloads = {}
-        
-        def add_download(self, record=None, **kwargs):
-            return 1
-        
-        def is_downloaded(self, url):
-            return False
-        
-        def get_downloads(self, **kwargs):
-            return []
-        
-        def get_failed_downloads(self):
-            return []
-        
-        def get_statistics(self):
-            return {"total_downloads": 0, "total_size_human": "0 B", "failed_downloads": 0, "by_platform": {}}
-        
-        def search_downloads(self, query):
-            return []
-        
-        def add_to_queue(self, *args, **kwargs):
-            return 1
-        
-        def get_queue(self):
-            return []
-        
-        def clear_queue(self):
-            pass
-        
-        def update_queue_status(self, *args):
-            pass
-
-if not QUALITY_AVAILABLE:
-    class QualityPreset:
-        STANDARD = "standard"
-        HIGH = "high"
-        MAXIMUM = "maximum"
-    
-    class QualityManager:
-        def __init__(self):
-            pass
-        
-        def get_video_format_string(self):
-            return "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
-        
-        def get_audio_format_string(self):
-            return "bestaudio/best"
-        
-        def get_ytdlp_options(self, **kwargs):
-            return {}
-        
-        def apply_preset(self, preset):
-            pass
-        
-        def print_settings(self):
-            print("  Using default quality settings")
-        
-        def save_settings(self):
-            pass
-    
-    class QualitySelector:
-        def __init__(self, manager=None):
-            self.manager = manager or QualityManager()
-        
-        def select_preset(self):
-            return QualityPreset.STANDARD
 
 # ============================================================================
 # CONSTANTS
@@ -403,7 +198,7 @@ APP_NAME = "Personal Media Downloader"
 # LOGGER SETUP
 # ============================================================================
 
-logger = get_logger() if UTILS_AVAILABLE else logging.getLogger("downloader")
+logger = get_logger()
 
 # ============================================================================
 # CUSTOM EXCEPTIONS
@@ -503,6 +298,21 @@ class _SilentYtdlpLogger:
         pass
 
 
+class _ArchiveLogger:
+    """Logger that detects archive-skip messages."""
+    def __init__(self):
+        self.skipped = False
+    def debug(self, msg):
+        if 'has already been recorded' in msg or 'already been downloaded' in msg:
+            self.skipped = True
+    def warning(self, msg):
+        pass
+    def error(self, msg):
+        # Show actual download errors
+        if msg and 'cookie' not in msg.lower() and 'dpapi' not in msg.lower():
+            print(f"\n  ⚠ {msg[:100]}")
+
+
 import contextlib
 
 @contextlib.contextmanager
@@ -538,6 +348,8 @@ def _try_with_cookies(opts: Dict, url: str, *, download: bool = False,
                 cookie_opts['postprocessors'] = opts['postprocessors'].copy()
             cookie_opts['cookiesfrombrowser'] = (browser,)
             cookie_opts['logger'] = _SilentYtdlpLogger()
+            if not download:
+                cookie_opts.pop('download_archive', None)
             with _suppress_stderr():
                 with yt_dlp.YoutubeDL(cookie_opts) as ydl:
                     result = ydl.extract_info(url, download=download, process=process)
@@ -552,6 +364,8 @@ def _try_with_cookies(opts: Dict, url: str, *, download: bool = False,
         if 'postprocessors' in opts:
             direct_opts['postprocessors'] = opts['postprocessors'].copy()
         direct_opts['logger'] = _SilentYtdlpLogger()
+        if not download:
+            direct_opts.pop('download_archive', None)
         with yt_dlp.YoutubeDL(direct_opts) as ydl:
             return ydl.extract_info(url, download=download, process=process)
     except Exception:
@@ -565,42 +379,91 @@ def _get_working_opts_with_cookies(base_opts: Dict, url: str,
     if browsers is None:
         browsers = ['chrome', 'firefox', 'edge']
     
+    _ml = get_ml_logger() if ML_LOGGER_AVAILABLE else None
+    
     # Try each browser's cookies
     for browser in browsers:
+        t0 = time.time()
         try:
             opts = base_opts.copy()
             if 'postprocessors' in base_opts:
                 opts['postprocessors'] = base_opts['postprocessors'].copy()
             opts['cookiesfrombrowser'] = (browser,)
             opts['logger'] = _SilentYtdlpLogger()
+            probe_opts = opts.copy()
+            probe_opts.pop('download_archive', None)
             with _suppress_stderr():
-                with yt_dlp.YoutubeDL(opts) as ydl:
+                with yt_dlp.YoutubeDL(probe_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
                     if info:
+                        if _ml:
+                            _ml.log_security("cookie_try", br=browser, ok=True,
+                                             ms=int((time.time() - t0) * 1000))
                         return info, opts
         except Exception:
+            if _ml:
+                _ml.log_security("cookie_try", br=browser, ok=False,
+                                 ms=int((time.time() - t0) * 1000))
             continue
     
     # Direct (no cookies)
+    t0 = time.time()
     try:
         opts = base_opts.copy()
         if 'postprocessors' in base_opts:
             opts['postprocessors'] = base_opts['postprocessors'].copy()
         opts['logger'] = _SilentYtdlpLogger()
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        probe_opts = opts.copy()
+        probe_opts.pop('download_archive', None)
+        with yt_dlp.YoutubeDL(probe_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             if info:
+                if _ml:
+                    _ml.log_security("cookie_try", br="direct", ok=True,
+                                     ms=int((time.time() - t0) * 1000))
                 return info, opts
     except Exception:
-        pass
+        if _ml:
+            _ml.log_security("cookie_try", br="direct", ok=False,
+                             ms=int((time.time() - t0) * 1000))
     
     return None, base_opts
 
+def _clean_error_msg(err_str: str) -> str:
+    """Extract a concise human-readable error status from yt-dlp error string."""
+    if not err_str:
+        return "Failed"
+    s = str(err_str).lower()
+    if "requested format is not available" in s or "no video formats" in s:
+        return "Format unavail"
+    if "private video" in s:
+        return "Private video"
+    if "video unavailable" in s or "is not available" in s:
+        return "Video unavail"
+    if "members-only" in s:
+        return "Members only"
+    if "copyright" in s:
+        return "Copyright block"
+    if "geo" in s and "block" in s:
+        return "Geo-blocked"
+    if "http error 404" in s or "not found" in s:
+        return "HTTP 404"
+    if "http error 403" in s or "forbidden" in s:
+        return "HTTP 403"
+    if "cookie" in s:
+        return "Cookie error"
+    
+    # Strip raw prefixes like "ERROR: [youtube] <id>: "
+    clean = re.sub(r'^(?:ERROR:\s*)?(?:\[[^\]]+\]\s*)?(?:[a-zA-Z0-9_-]{11}:\s*)?', '', str(err_str)).strip()
+    return clean[:24] if clean else "Error"
+
+
 def _print_playlist_line(idx: int, total: int, icon: str, title: str,
-                         status: str, elapsed: float):
+                         status: str, elapsed: float, end: str = '\n'):
     """Print a compact single-line playlist item status."""
     w = len(str(total))
-    title_trunc = title[:42]
+    safe_title = str(title or 'Unknown')
+    title_trunc = safe_title[:42]
     # Elapsed formatting
     m, s = int(elapsed // 60), int(elapsed % 60)
     h = int(m // 60)
@@ -610,7 +473,8 @@ def _print_playlist_line(idx: int, total: int, icon: str, title: str,
         time_str = f"{m}m{s:02d}s"
     else:
         time_str = f"{s}s"
-    print(f"  [{idx:>{w}}/{total}] {icon} {title_trunc:<42} {status:<16} {time_str:>7}")
+    line_str = f"  [{idx:>{w}}/{total}] {icon} {title_trunc:<42} {status:<16} {time_str:>7}".ljust(80)
+    print(f"\r{line_str}", end=end, flush=True)
 
 
 # ============================================================================
@@ -626,6 +490,14 @@ class MediaDownloader:
         self.progress = DownloadProgressHook()
         self.js_runtimes = self._detect_js_runtimes()
         self._init_directories()
+        # Bootstrap ML logger
+        if ML_LOGGER_AVAILABLE:
+            self.ml = get_ml_logger(
+                filepath=Config.ML_LOG_PATH if CONFIG_AVAILABLE else None,
+                enabled=Config.ML_LOG_ENABLED if CONFIG_AVAILABLE else True,
+            )
+        else:
+            self.ml = None
     
     def _init_directories(self):
         """Initialize all directories"""
@@ -731,6 +603,7 @@ class MediaDownloader:
         """Extract info with minimal errors during probing"""
         info_opts = opts.copy()
         info_opts.pop("format", None)
+        info_opts.pop("download_archive", None)
         info_opts["ignore_no_formats_error"] = True
         if silent:
             info_opts["logger"] = _SilentYtdlpLogger()
@@ -809,32 +682,14 @@ class MediaDownloader:
             'download_archive': Config.DOWNLOAD_ARCHIVE,
         }
         
-        # ===== YOUTUBE BYPASS OPTIONS =====
+        # ===== YOUTUBE OPTIONS =====
+        # Let yt-dlp use its own default client order (includes visionos HLS
+        # which works without cookies, PO tokens, or JS signature solvers).
         if platform == Platform.YOUTUBE:
             opts.update({
-                # Use multiple client fallbacks
-                'extractor_args': {
-                    'youtube': {
-                        # Try these clients in order
-                        'player_client': ['web', 'ios', 'android'],
-                        'player_skip': ['webpage', 'configs'],
-                    }
-                },
-                # Additional bypass options
                 'age_limit': 99,
                 'geo_bypass': True,
                 'geo_bypass_country': 'US',
-                
-                # User agent spoofing
-                'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Accept-Language': 'en-us,en;q=0.5',
-                    'Sec-Fetch-Mode': 'navigate',
-                },
-                
-                # Try to get cookies from browser (uncomment if needed)
-                # 'cookiesfrombrowser': ('chrome',),
             })
         
         # Audio only
@@ -917,9 +772,7 @@ class MediaDownloader:
         self._apply_js_runtimes(opts)
         
         if platform == Platform.YOUTUBE:
-            opts['extractor_args'] = {
-                'youtube': {'player_client': ['web_safari', 'android_vr', 'android', 'ios', 'web']}
-            }
+            pass  # Let yt-dlp use its default client order
         
         # process=False skips format selection entirely — avoids
         # "Requested format is not available" errors during preview.
@@ -969,9 +822,7 @@ class MediaDownloader:
         self._apply_js_runtimes(opts)
 
         if platform == Platform.YOUTUBE:
-            opts['extractor_args'] = {
-                'youtube': {'player_client': ['web_safari', 'android_vr', 'android', 'ios', 'web']}
-            }
+            pass  # Let yt-dlp use its default client order
 
         info = None
         # Try cookies then direct (silently)
@@ -1204,11 +1055,9 @@ class MediaDownloader:
             base_opts.setdefault('postprocessors', []).append({'key': 'FFmpegSubtitlesConvertor', 'format': 'srt'})
             base_opts.setdefault('postprocessors', []).append({'key': 'FFmpegEmbedSubtitle'})
 
-        # YouTube-specific strategies
+        # YouTube-specific options
         if platform == Platform.YOUTUBE:
-            base_opts['extractor_args'] = {
-                'youtube': {'player_client': ['web_safari', 'android_vr', 'android', 'ios', 'web']}
-            }
+            pass  # Let yt-dlp use its default client order
 
         # Try with cookies, then direct (silently)
         info = None
@@ -1291,19 +1140,78 @@ class MediaDownloader:
             progress_callback({'type': 'complete', 'filepath': out_dir, 'title': title})
         return {'status': 'complete', 'filepath': out_dir, 'title': title}
 
+    def download_spotify(self, url: str, quality: str = "flac", output_dir: str = None) -> Union[Optional[str], List[str]]:
+        """Download track, album, or playlist from Spotify / streaming music with SpotiFLAC"""
+        if not SPOTIFLAC_AVAILABLE:
+            print("  ✗ SpotiFLAC module is not available")
+            return None
+        
+        downloader = SpotiFLACDownloader(output_dir=output_dir or Config.MUSIC_DIR)
+        print(f"\n  🎵 SpotiFLAC Lossless Music Downloader")
+        print(f"  Resolving metadata for {url}...")
+        
+        def _cli_progress(p):
+            msg = p.get('message', '')
+            if msg:
+                print(f"  -> {msg}")
+        
+        try:
+            results = downloader.download_url(url, quality=quality, output_dir=output_dir, progress_callback=_cli_progress)
+        except Exception as e:
+            print(f"  ✗ SpotiFLAC error: {e}")
+            return None
+
+        if not results:
+            print("  ✗ Failed to download track(s)")
+            return None
+        
+        # Record into database
+        for r in results:
+            if self.db:
+                rec = DownloadRecord(
+                    url=url,
+                    title=r.get('title', 'Unknown'),
+                    platform='Spotify',
+                    format=r.get('format', quality.upper()),
+                    quality=quality,
+                    filesize=r.get('filesize', 0),
+                    filepath=r.get('filepath', ''),
+                    status=DownloadStatus.COMPLETE,
+                    media_type='audio',
+                )
+                self.db.add_download(rec)
+        
+        if len(results) == 1:
+            return results[0].get('filepath')
+        return [r.get('filepath') for r in results]
+
     def download_video(self,
                     url: str,
                     quality: str = "1080p",
                     output_dir: str = None,
                     filename: str = None,
                     embed_thumbnail: bool = True,
+                    _dl_start_time: float = None,  # internal: set by wrapper
                     embed_metadata: bool = True,
                     subtitles: bool = False,
-                    subtitle_langs: List[str] = None) -> Optional[str]:
+                    subtitle_langs: List[str] = None,
+                    prompt_redownload: bool = True) -> Optional[str]:
         """Download video - FAST version with quick timeout"""
+        
+        _dl_t0 = _dl_start_time or time.time()
         
         self.progress.reset()
         platform = detect_platform(url)
+        
+        if platform == Platform.SPOTIFY or (SPOTIFLAC_AVAILABLE and SpotiFLACDownloader.is_spotify_url(url)):
+            print("  [Spotify detected: downloading high-fidelity audio/FLAC with cover art & lyrics]")
+            res = self.download_spotify(url, quality="flac", output_dir=output_dir)
+            return res if isinstance(res, str) else (res[0] if res else None)
+        
+        if self.ml:
+            self.ml.log_download("start", url, pl=platform.value if PLATFORMS_AVAILABLE else "unknown",
+                                q=quality, m="yt-dlp", mt="video")
+        
         if platform == Platform.YOUTUBE and "list=" in url.lower():
             video_id = extract_video_id(url, platform)
             if video_id:
@@ -1361,8 +1269,7 @@ class MediaDownloader:
         if platform == Platform.YOUTUBE:
             print("  Connecting to YouTube...", end='', flush=True)
 
-            preferred_clients = ['web_safari', 'android_vr', 'android', 'ios', 'web']
-            base_opts['extractor_args'] = {'youtube': {'player_client': preferred_clients}}
+            # Let yt-dlp use its default client order (includes visionos HLS)
 
             # Try browser cookies silently, then direct
             info, working_opts = _get_working_opts_with_cookies(base_opts, url)
@@ -1377,7 +1284,6 @@ class MediaDownloader:
             else:
                 # Fallback: skip extract_info, go straight to download
                 working_opts = base_opts.copy()
-                working_opts['extractor_args'] = {'youtube': {'player_client': preferred_clients}}
                 working_opts['logger'] = _SilentYtdlpLogger()
                 working_opts['progress_hooks'] = [self.progress]
                 direct_download = True
@@ -1386,7 +1292,9 @@ class MediaDownloader:
             # Other platforms (Instagram, etc.) - simpler approach
             print("  Fetching...", end='', flush=True)
             try:
-                with yt_dlp.YoutubeDL(base_opts) as ydl:
+                probe_opts = base_opts.copy()
+                probe_opts.pop('download_archive', None)
+                with yt_dlp.YoutubeDL(probe_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
                     print(" OK")
                     working_opts = base_opts
@@ -1432,20 +1340,6 @@ class MediaDownloader:
         download_opts['no_warnings'] = True
         
         # Track if video was skipped (archive) 
-        class _ArchiveLogger:
-            """Logger that detects archive-skip messages."""
-            def __init__(self):
-                self.skipped = False
-            def debug(self, msg):
-                if 'has already been recorded' in msg or 'already been downloaded' in msg:
-                    self.skipped = True
-            def warning(self, msg):
-                pass
-            def error(self, msg):
-                # Show actual download errors
-                if msg and 'cookie' not in msg.lower() and 'dpapi' not in msg.lower():
-                    print(f"\n  ⚠ {msg[:100]}")
-        
         archive_logger = _ArchiveLogger()
         download_opts['logger'] = archive_logger
         
@@ -1456,6 +1350,8 @@ class MediaDownloader:
         except Exception as e:
             err = str(e).lower()
             if "requested format is not available" in err or "no video formats found" in err:
+                if self.ml:
+                    self.ml.log_error("fallback", url, reason="format_unavail", q=quality)
                 print("  Format unavailable, retrying with best available...")
                 fallback_opts = download_opts.copy()
                 fallback_opts['format'] = 'bestvideo+bestaudio/best'
@@ -1481,17 +1377,44 @@ class MediaDownloader:
         
         # Check if video was skipped due to archive
         if archive_logger.skipped:
-            print(f"\n  ℹ Video already downloaded (found in archive).")
-            # Try to find the existing file
+            existing_fp = None
             for f in os.listdir(out_dir):
-                if f.endswith(('.mp4', '.mkv', '.webm')):
+                if f.endswith(('.mp4', '.mkv', '.webm', '.avi', '.mov')):
                     fp = os.path.join(out_dir, f)
                     if title != 'Unknown' and title[:15].lower() in f.lower():
-                        print(f"  ✓ Existing: {fp}")
-                        print(f"  ✓ Size: {format_size(os.path.getsize(fp))}")
-                        return fp
-            print(f"  Check: {out_dir}")
-            return out_dir
+                        existing_fp = fp
+                        break
+            
+            print(f"\n  ℹ Video already downloaded (found in archive).")
+            if existing_fp:
+                print(f"  ✓ Existing: {existing_fp}")
+                print(f"  ✓ Size:     {format_size(os.path.getsize(existing_fp))}")
+            else:
+                print(f"  Check: {out_dir}")
+
+            redownload = False
+            if prompt_redownload:
+                print("\n  Do you want to:")
+                print("    1. Skip (keep existing file) [Default]")
+                print("    2. Re-download (overwrite)")
+                choice = input("\n  Select [1]: ").strip().lower()
+                if choice in ('2', 'r', 'redownload', 're-download', 'y', 'yes'):
+                    redownload = True
+
+            if redownload:
+                print("\n  🔄 Re-downloading video...")
+                redl_opts = download_opts.copy()
+                redl_opts.pop('download_archive', None)
+                redl_opts['overwrites'] = True
+                archive_logger.skipped = False
+                try:
+                    with yt_dlp.YoutubeDL(redl_opts) as ydl:
+                        ydl.download([url])
+                except Exception as e:
+                    print(f"  ⚠ Re-download error: {e}")
+            else:
+                print("  Skipped.")
+                return existing_fp or out_dir
         
         # Find file
         safe_title = sanitize_filename(title) if title != 'Unknown' else ''
@@ -1517,6 +1440,10 @@ class MediaDownloader:
                                 uploader=uploader, duration=duration, quality=quality_label,
                                 filesize=filesize, filepath=filepath, status='complete')
             
+            if self.ml:
+                self.ml.log_download("done", url, pl=platform.value, q=quality_label,
+                                     sz=filesize, dur=round(time.time() - _dl_t0, 1))
+            
             print(f"\n  ✓ Complete: {filepath}")
             print(f"  ✓ Size: {format_size(filesize)}")
             return filepath
@@ -1530,11 +1457,18 @@ class MediaDownloader:
                     output_dir: str = None,
                     filename: str = None,
                     embed_thumbnail: bool = True,
-                    embed_metadata: bool = True) -> Optional[str]:
+                    embed_metadata: bool = True,
+                    prompt_redownload: bool = True) -> Optional[str]:
         """Download audio - FAST version"""
         
         self.progress.reset()
         platform = detect_platform(url)
+        
+        if platform == Platform.SPOTIFY or (SPOTIFLAC_AVAILABLE and SpotiFLACDownloader.is_spotify_url(url)):
+            quality = "flac" if audio_format.lower() in ("flac", "wav") else "320k"
+            res = self.download_spotify(url, quality=quality, output_dir=output_dir)
+            return res if isinstance(res, str) else (res[0] if res else None)
+        
         if platform == Platform.YOUTUBE and "list=" in url.lower():
             video_id = extract_video_id(url, platform)
             if video_id:
@@ -1573,9 +1507,7 @@ class MediaDownloader:
         if platform == Platform.YOUTUBE:
             print("  Connecting...", end='', flush=True)
 
-            preferred_clients = ['web_safari', 'android_vr', 'android', 'ios', 'web']
-            base_opts['extractor_args'] = {'youtube': {'player_client': preferred_clients}}
-
+            # Let yt-dlp use its default client order (includes visionos HLS)
             # Try browser cookies silently, then direct
             info, working_opts = _get_working_opts_with_cookies(base_opts, url)
             if info:
@@ -1590,7 +1522,9 @@ class MediaDownloader:
         else:
             print("  Fetching...", end='', flush=True)
             try:
-                with yt_dlp.YoutubeDL(base_opts) as ydl:
+                probe_opts = base_opts.copy()
+                probe_opts.pop('download_archive', None)
+                with yt_dlp.YoutubeDL(probe_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
                     print(" OK")
                     working_opts = base_opts
@@ -1606,9 +1540,77 @@ class MediaDownloader:
         print(f"  Duration: {format_duration(duration)}")
         print(f"  Format:   {audio_format.upper()}\n")
         
+        archive_logger = _ArchiveLogger()
+        working_opts['logger'] = archive_logger
+
         print("  Downloading...")
-        with yt_dlp.YoutubeDL(working_opts) as ydl:
-            ydl.download([url])
+        try:
+            with yt_dlp.YoutubeDL(working_opts) as ydl:
+                ydl.download([url])
+        except Exception as e:
+            err = str(e).lower()
+            if "requested format is not available" in err or "no video formats" in err:
+                print("  Format unavailable, retrying with best available...")
+                fallback_opts = working_opts.copy()
+                fallback_opts['format'] = 'bestaudio/best'
+                fallback_opts.pop('extractor_args', None)
+                try:
+                    with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                        ydl.download([url])
+                except Exception as e2:
+                    print(f"  ⚠ Download error: {e2}")
+            elif "403" in err or "forbidden" in err:
+                print("  HTTP 403, retrying with fallback format...")
+                fallback_opts = working_opts.copy()
+                fallback_opts['format'] = 'best'
+                fallback_opts.pop('extractor_args', None)
+                try:
+                    with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                        ydl.download([url])
+                except Exception as e2:
+                    print(f"  ⚠ Download error: {e2}")
+            else:
+                print(f"  ⚠ Download error: {e}")
+        
+        if archive_logger.skipped:
+            existing_fp = None
+            for f in os.listdir(out_dir):
+                if f.endswith(('.mp3', '.m4a', '.opus', '.flac', '.ogg')):
+                    fp = os.path.join(out_dir, f)
+                    if title != 'Unknown' and title[:15].lower() in f.lower():
+                        existing_fp = fp
+                        break
+            
+            print(f"\n  ℹ Audio already downloaded (found in archive).")
+            if existing_fp:
+                print(f"  ✓ Existing: {existing_fp}")
+                print(f"  ✓ Size:     {format_size(os.path.getsize(existing_fp))}")
+            else:
+                print(f"  Check: {out_dir}")
+
+            redownload = False
+            if prompt_redownload:
+                print("\n  Do you want to:")
+                print("    1. Skip (keep existing file) [Default]")
+                print("    2. Re-download (overwrite)")
+                choice = input("\n  Select [1]: ").strip().lower()
+                if choice in ('2', 'r', 'redownload', 're-download', 'y', 'yes'):
+                    redownload = True
+
+            if redownload:
+                print("\n  🔄 Re-downloading audio...")
+                redl_opts = working_opts.copy()
+                redl_opts.pop('download_archive', None)
+                redl_opts['overwrites'] = True
+                archive_logger.skipped = False
+                try:
+                    with yt_dlp.YoutubeDL(redl_opts) as ydl:
+                        ydl.download([url])
+                except Exception as e:
+                    print(f"  ⚠ Re-download error: {e}")
+            else:
+                print("  Skipped.")
+                return existing_fp or out_dir
         
         # Find file
         safe_title = sanitize_filename(title)
@@ -1654,6 +1656,11 @@ class MediaDownloader:
         """
 
         platform = detect_platform(url)
+        if platform == Platform.SPOTIFY or (SPOTIFLAC_AVAILABLE and SpotiFLACDownloader.is_spotify_url(url)):
+            quality = "flac" if (audio_only and audio_format.lower() in ("flac", "wav")) else ("320k" if audio_only else "flac")
+            res = self.download_spotify(url, quality=quality)
+            return res if isinstance(res, list) else ([res] if res else [])
+
         logger.info(f"Downloading playlist: {url}")
         media_type = "audio" if audio_only else "video"
 
@@ -1668,9 +1675,7 @@ class MediaDownloader:
         self._apply_js_runtimes(flat_opts)
 
         if platform == Platform.YOUTUBE:
-            flat_opts['extractor_args'] = {
-                'youtube': {'player_client': ['web_safari', 'android_vr', 'android', 'ios', 'web']}
-            }
+            pass  # Let yt-dlp use its default client order
 
         print(f"\n  {'═' * 60}")
         print(f"  📋  Fetching playlist info...", end='', flush=True)
@@ -1743,7 +1748,6 @@ class MediaDownloader:
                     'quiet': True, 'no_warnings': True, 'skip_download': True,
                     'noplaylist': True, 'socket_timeout': 8,
                     'logger': _SilentYtdlpLogger(),
-                    'extractor_args': {'youtube': {'player_client': ['web_safari', 'android_vr', 'android', 'ios', 'web']}},
                 }
                 self._apply_js_runtimes(probe_opts)
                 _, probe_working = _get_working_opts_with_cookies(probe_opts, first_url)
@@ -1794,7 +1798,7 @@ class MediaDownloader:
             if interrupted:
                 break
 
-            video_title = entry.get('title', f'Item {idx}')
+            video_title = str(entry.get('title') or f'Item {idx}')
             video_id = entry.get('id') or entry.get('url', '')
 
             # Build URL
@@ -1820,7 +1824,7 @@ class MediaDownloader:
 
             # Print header for this item
             elapsed = time.time() - t_start
-            _print_playlist_line(idx, total, '⬇', video_title, 'downloading...', elapsed)
+            _print_playlist_line(idx, total, '⬇', video_title, 'downloading...', elapsed, end='')
 
             # Build opts for this item
             safe_title = sanitize_filename(video_title)
@@ -1849,9 +1853,7 @@ class MediaDownloader:
                 item_opts['cookiesfrombrowser'] = working_cookie
 
             if platform == Platform.YOUTUBE:
-                item_opts['extractor_args'] = {
-                    'youtube': {'player_client': ['web_safari', 'android_vr', 'android', 'ios', 'web']}
-                }
+                pass  # Let yt-dlp use its default client order
 
             if audio_only:
                 item_opts['format'] = 'bestaudio/best'
@@ -1902,7 +1904,15 @@ class MediaDownloader:
                     print(f"\r  ⚠  Interrupted by user!                                                ")
                     break
                 except Exception as e:
-                    last_error = str(e)[:60]
+                    err_msg = str(e)
+                    last_error = err_msg
+                    err_lower = err_msg.lower()
+                    
+                    # Automatic fallback for format/client issues on retry
+                    if ("requested format" in err_lower or "no video formats" in err_lower or "400" in err_lower) and attempt < max_retries:
+                        item_opts['format'] = 'bestaudio/best' if audio_only else 'bestvideo+bestaudio/best'
+                        item_opts.pop('extractor_args', None)
+
                     if attempt < max_retries:
                         wait = 2 ** attempt
                         print(f"\r       ⟳ Retry {attempt+1}/{max_retries} in {wait}s...                          ", end='', flush=True)
@@ -1931,12 +1941,13 @@ class MediaDownloader:
                 downloaded.append(fp or outtmpl)
 
                 elapsed = time.time() - t_start
-                size_str = format_size(fsize) if fsize else ""
-                print(f"\r  [{idx:>{len(str(total))}}/{total}] ✓ {video_title[:42]:<42} {size_str:>10}")
+                size_str = format_size(fsize) if fsize else "complete"
+                _print_playlist_line(idx, total, '✓', video_title, size_str, elapsed, end='\n')
             else:
                 elapsed = time.time() - t_start
-                print(f"\r  [{idx:>{len(str(total))}}/{total}] ✗ {video_title[:42]:<42} {last_error[:15]}")
-                failed_items.append((idx, video_title[:40], last_error))
+                err_desc = _clean_error_msg(last_error)
+                _print_playlist_line(idx, total, '✗', video_title, err_desc, elapsed, end='\n')
+                failed_items.append((idx, video_title[:40], last_error or 'ERROR'))
 
             # Rate limiting — small delay between downloads to avoid throttling
             if idx < total and not interrupted:
@@ -1982,6 +1993,13 @@ class MediaDownloader:
                 print(f"    ... and {len(failed_items) - 20} more")
 
         print(f"  {'═' * 60}\n")
+
+        # ML: playlist summary event
+        if self.ml:
+            self.ml.log_download("playlist_done", url,
+                                 total=total, ok=len(downloaded),
+                                 fail=len(failed_items), skip=skipped,
+                                 dur=round(elapsed, 1), sz=total_bytes)
 
         # Desktop notification
         _send_notification(
@@ -2066,9 +2084,6 @@ class MediaDownloader:
             
             # For YouTube, try with browser cookies first (silently)
             if platform == Platform.YOUTUBE:
-                opts['extractor_args'] = {
-                    'youtube': {'player_client': ['web_safari', 'android_vr', 'android', 'ios', 'web']}
-                }
                 info = _try_with_cookies(opts, url, download=True)
                 if not info:
                     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -2085,9 +2100,16 @@ class MediaDownloader:
                     files.append(os.path.join(out_dir, f))
             
             if files:
-                print(f"  ✓ Saved: {len(files)} file(s)")
+                print(f"  ✅ Saved: {len(files)} file(s)")
                 for f in files:
-                    print(f"    - {os.path.basename(f)}")
+                    if SUBTITLE_AI_AVAILABLE and f.endswith('.srt'):
+                        try:
+                            clean_subtitle_file(f, f)
+                            print(f"    📄 {os.path.basename(f)} (cleaned with Subtitle AI)")
+                        except Exception:
+                            print(f"    📄 {os.path.basename(f)}")
+                    else:
+                        print(f"    📄 {os.path.basename(f)}")
             else:
                 print("  ⚠ No subtitles found")
             
@@ -2115,9 +2137,9 @@ class MediaDownloader:
                 self.progress.reset()
                 
                 if audio_only:
-                    fp = self.download_audio(url)
+                    fp = self.download_audio(url, prompt_redownload=False)
                 else:
-                    fp = self.download_video(url, quality=quality)
+                    fp = self.download_video(url, quality=quality, prompt_redownload=False)
                 
                 results[url] = fp or "downloaded"
                 
@@ -2302,11 +2324,9 @@ class BackgroundDownloadManager:
         }
         self.downloader._apply_js_runtimes(opts)
 
-        # YouTube-specific: try multiple clients
+        # YouTube-specific options
         if platform == Platform.YOUTUBE:
-            opts['extractor_args'] = {
-                'youtube': {'player_client': ['web_safari', 'android_vr', 'android', 'ios', 'web']}
-            }
+            pass  # Let yt-dlp use its default client order
 
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -2466,6 +2486,11 @@ MAIN MENU:
     19. Clear Temp Files
     20. Update yt-dlp
     21. Feature Settings
+    
+  ADVANCED & LOSSLESS DOWNLOADS:
+    22. SpotiFLAC Lossless Music    🎵 Spotify / FLAC / 320k / Lyrics
+    23. Spotify Search & Explorer   🎵 Browse Songs, Albums, Playlists & Synced Lyrics
+    24. Unknown Media Sniffer       🌐 Webpage & Embedded Player (Video+Audio+Subs)
     
     0.  Exit
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2690,7 +2715,7 @@ MAIN MENU:
         return code
     
     def _select_subtitles(self, url: str, info: dict = None) -> Optional[List[str]]:
-        """Show available subtitles and let user select which to download."""
+        """Show available subtitles with AI language recommendation and let user select."""
         
         # Get subtitle info from already-fetched info or fetch fresh
         if not info:
@@ -2709,66 +2734,104 @@ MAIN MENU:
             print("\n  ⚠ No subtitles available for this video.")
             return None
         
+        # Detect user's language for smart recommendation
+        user_lang = detect_user_language() if SUBTITLE_AI_AVAILABLE else 'en'
+        user_lang_name = self._get_lang_name(user_lang)
+        
         # Build display list: (code, name, type)
         sub_entries = []
         
         # Manual (human-uploaded) subtitles first
-        for code in sorted(manual_subs.keys()):
+        manual_codes = sorted(manual_subs.keys())
+        if SUBTITLE_AI_AVAILABLE:
+            manual_codes = recommend_languages(manual_codes, user_lang)
+        for code in manual_codes:
             name = self._get_lang_name(code)
             sub_entries.append((code, name, 'manual'))
         
         # Auto-generated subtitles
-        for code in sorted(auto_subs.keys()):
-            if code not in manual_subs:  # Don't duplicate
-                name = self._get_lang_name(code)
-                sub_entries.append((code, name, 'auto'))
+        auto_codes = sorted(auto_subs.keys())
+        if SUBTITLE_AI_AVAILABLE:
+            auto_codes = recommend_languages(
+                [c for c in auto_codes if c not in manual_subs], user_lang
+            )
+        else:
+            auto_codes = [c for c in auto_codes if c not in manual_subs]
+        for code in auto_codes:
+            name = self._get_lang_name(code)
+            sub_entries.append((code, name, 'auto'))
         
         if not sub_entries:
             print("\n  ⚠ No subtitles available for this video.")
             return None
         
-        # Display available subtitles - compact view
+        # Display available subtitles — enhanced UI with emojis
         manual_count = sum(1 for _, _, t in sub_entries if t == 'manual')
         auto_count = sum(1 for _, _, t in sub_entries if t == 'auto')
         
-        print(f"\n  {'═' * 55}")
-        print(f"  AVAILABLE SUBTITLES")
-        print(f"  {'─' * 55}")
+        print(f"\n  {'═' * 58}")
+        print(f"  🎬 AVAILABLE SUBTITLES")
+        if SUBTITLE_AI_AVAILABLE:
+            print(f"  🌐 Your language: {user_lang_name} [{user_lang}]")
+        print(f"  {'─' * 58}")
         
         if manual_count > 0:
-            print(f"  Manual subtitles ({manual_count}):")
+            print(f"  📝 Manual subtitles ({manual_count}):")
             idx = 1
             for code, name, stype in sub_entries:
                 if stype == 'manual':
-                    print(f"    {idx:3}. [{code:6}]  {name}")
+                    label = get_recommendation_label(code, user_lang) if SUBTITLE_AI_AVAILABLE else ''
+                    star = ' ⭐' if '★' in label else ''
+                    badge = label.replace(' ★ recommended', '') if label else ''
+                    if SUBTITLE_AI_AVAILABLE and code.split('-')[0].lower() == user_lang:
+                        print(f"    {idx:3}. [{code:10}]  {name} ⭐ recommended")
+                    elif SUBTITLE_AI_AVAILABLE and code.split('-')[0].lower() == 'en' and user_lang != 'en':
+                        print(f"    {idx:3}. [{code:10}]  {name} 🌍 universal")
+                    else:
+                        print(f"    {idx:3}. [{code:10}]  {name}")
                     idx += 1
         
         if auto_count > 0:
             if manual_count > 0:
-                print(f"  {'─' * 55}")
-            # Show compact summary instead of listing all 100+ auto subs
+                print(f"  {'─' * 58}")
+            print(f"  🤖 Auto-generated ({auto_count} available):")
+            
+            # Show recommended + popular auto subs
             auto_entries = [(c, n) for c, n, t in sub_entries if t == 'auto']
-            named = [(c, n) for c, n in auto_entries if n != c]  # has a real name
-            print(f"  Auto-generated ({auto_count} available):")
-            # Show first few popular ones as examples
-            popular_codes = ['en', 'es', 'fr', 'de', 'ja', 'ko', 'pt', 'ru', 'hi', 'zh', 'ar', 'it']
-            shown = []
-            for pc in popular_codes:
+            shown_count = 0
+            
+            # Show user's language first if available
+            for c, n in auto_entries:
+                base = c.split('-')[0].lower()
+                if base == user_lang and shown_count < 12:
+                    print(f"       [{c:10}]  {n} ⭐ recommended")
+                    shown_count += 1
+                    break
+            
+            # Show popular languages
+            popular = ['en', 'es', 'fr', 'de', 'ja', 'ko', 'pt', 'ru', 'hi', 'zh', 'ar', 'it']
+            for pc in popular:
+                if pc == user_lang:
+                    continue  # Already shown
                 for c, n in auto_entries:
                     if c == pc or c.startswith(pc + '-'):
-                        shown.append(f"{n} [{c}]")
+                        if shown_count < 12:
+                            if pc == 'en' and user_lang != 'en':
+                                print(f"       [{c:10}]  {n} 🌍")
+                            else:
+                                print(f"       [{c:10}]  {n}")
+                            shown_count += 1
                         break
-            if shown:
-                print(f"    e.g. {', '.join(shown[:6])}")
-                if len(shown) > 6:
-                    print(f"         {', '.join(shown[6:])}")
-            print(f"    → Type language code (e.g. de, sv, nl) for any auto sub")
+            
+            remaining = auto_count - shown_count
+            if remaining > 0:
+                print(f"       ... and {remaining} more languages")
+            print(f"    💡 Type any language code (e.g. de, sv, nl)")
         
-        total = len(sub_entries)
-        print(f"  {'─' * 55}")
-        print(f"  Options: Enter numbers (1-{manual_count}), 'all' for all manual,")
-        print(f"           or language codes (e.g. en,es,ja)")
-        print(f"  {'═' * 55}")
+        print(f"  {'─' * 58}")
+        print(f"  📋 Options: Enter numbers (1-{manual_count}), 'all' for all manual,")
+        print(f"              or language codes (e.g. en,es,ja)")
+        print(f"  {'═' * 58}")
         
         selection = input("\n  Select subtitles: ").strip()
         
@@ -2815,7 +2878,7 @@ MAIN MENU:
             selected_codes = unique
             
             names = [self._get_lang_name(c) for c in selected_codes]
-            print(f"\n  Selected: {', '.join(names)}")
+            print(f"\n  ✅ Selected: {', '.join(names)}")
             return selected_codes
         
         return None
@@ -3266,7 +3329,10 @@ MAIN MENU:
         print(f"  {'✓' if PLATFORMS_AVAILABLE else '○'} platforms.py")
         print(f"  {'✓' if QUALITY_AVAILABLE else '○'} quality_manager.py")
         print(f"  {'✓' if UTILS_AVAILABLE else '○'} utils.py")
-        print(f"  {'✓' if BOT_AVAILABLE else '○'} bot.py (optional)")
+        print(f"  {'✓' if UNIVERSAL_AVAILABLE else '○'} universal_downloader.py")
+        print(f"  {'✓' if SUBTITLE_AI_AVAILABLE else '○'} subtitle_ai.py")
+        print(f"  {'✓' if SPOTIFLAC_AVAILABLE else '○'} spotiflac.py")
+        print(f"  {'✓' if SEARCH_ENGINE_AVAILABLE else '○'} search_engine.py")
         print(f"  {'─' * 45}")
         print(f"  Python: {sys.version.split()[0]}")
         print(f"  {'═' * 45}")
@@ -3653,6 +3719,329 @@ MAIN MENU:
         
         input("\n  Press Enter to continue...")
     
+    def handle_spotiflac(self):
+        """Interactive SpotiFLAC music downloader"""
+        if not SPOTIFLAC_AVAILABLE:
+            print("\n  [ERROR] spotiflac.py module not found.")
+            input("\n  Press Enter...")
+            return
+
+        print(f"\n  {'═' * 60}")
+        print("  🎵 SpotiFLAC — Lossless Music Downloader")
+        print("  Supports: Spotify Tracks, Albums, Playlists, Artists")
+        print("  Features: Lossless FLAC, 320k MP3, Synced Lyrics, Cover Art")
+        print(f"  {'─' * 60}")
+
+        url = self.get_url()
+        if not url or url.lower() == 'back':
+            return
+        
+        self.handle_spotiflac_with_url(url)
+
+    def handle_spotiflac_with_url(self, url: str):
+        """Execute SpotiFLAC download for a given URL"""
+        if not SPOTIFLAC_AVAILABLE:
+            print("\n  [ERROR] spotiflac.py module not found.")
+            input("\n  Press Enter...")
+            return
+
+        print("\n  Audio Quality:")
+        print("    1. FLAC (Lossless Audio) [Default]")
+        print("    2. MP3 (320 kbps Extreme)")
+        q_choice = input("  Select [1]: ").strip() or "1"
+        quality = "flac" if q_choice == "1" else "320k"
+
+        print(f"\n  ⏳ Downloading with SpotiFLAC ({quality.upper()})...")
+        res = self.downloader.download_spotify(url, quality=quality)
+        if res:
+            print("\n  ✅ Download complete!")
+            if isinstance(res, str):
+                print(f"  Saved: {res}")
+            elif isinstance(res, list):
+                print(f"  Saved {len(res)} track(s) to {Config.MUSIC_DIR}")
+        
+    def handle_search_explorer(self, initial_query: str = None):
+        """Interactive Animated Search Engine & Playlist Explorer"""
+        if not SEARCH_ENGINE_AVAILABLE:
+            print("\n  [ERROR] search_engine.py module not found.")
+            input("\n  Press Enter...")
+            return
+
+        query = initial_query
+        while True:
+            if not query:
+                print(f"\n╭──────────────────────────────────────────────────────────────╮")
+                print(f"│  🎵 SPOTIFY SEARCH ENGINE & PLAYLIST EXPLORER                │")
+                print(f"│  Search Spotify songs, albums, playlists & artists           │")
+                print(f"╰──────────────────────────────────────────────────────────────╯")
+                query = input("\n  🔍 Enter Spotify song, artist, album, or URL (or 'b' to go back): ").strip()
+                if not query or query.lower() in ('b', 'back', 'exit', '0'):
+                    break
+
+            # Animated search spinner
+            stop_spin = threading.Event()
+            def _spin():
+                chars = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+                i = 0
+                while not stop_spin.is_set():
+                    sys.stdout.write(f"\r  {chars[i % len(chars)]} Searching Spotify & LRCLIB for '{query}'...")
+                    sys.stdout.flush()
+                    i += 1
+                    time.sleep(0.08)
+            t = threading.Thread(target=_spin, daemon=True)
+            t.start()
+
+            results = MediaSearchEngine.search(query, search_type="spotify", limit=24)
+            stop_spin.set()
+            t.join()
+            sys.stdout.write("\r" + " " * 80 + "\r")
+            sys.stdout.flush()
+
+            if not results:
+                print(f"\n  ✖ No results found for '{query}'. Try another search.")
+                query = None
+                continue
+
+            # Paginated browser loop
+            page = 0
+            page_size = 8
+            total_pages = (len(results) + page_size - 1) // page_size
+
+            while True:
+                start_idx = page * page_size
+                page_items = results[start_idx : start_idx + page_size]
+
+                print(f"\n╭────────────────────────────────────────────────────────────────────────────╮")
+                print(f"│  🔍 SEARCH RESULTS for \"{query[:32]}\"  [Page {page + 1}/{total_pages}]                     │")
+                print(f"╰────────────────────────────────────────────────────────────────────────────╯")
+
+                for i, item in enumerate(page_items, 1):
+                    global_idx = start_idx + i
+                    icon = "🎵" if item.media_type in ("track", "song") else ("💿" if item.media_type in ("album", "playlist") else "🎬")
+                    lyrics_badge = " [Synced Lyrics: ✔]" if item.has_synced_lyrics else ""
+                    dur = f"({item.duration_str})" if item.duration_str != "0:00" else ""
+                    artist_str = f" — {item.artist}" if item.artist else ""
+                    print(f"  {global_idx:2d}. {icon} {item.title[:38]}{artist_str[:25]} {dur} {lyrics_badge}")
+
+                print(f"\n  [1-{len(results)}] Select & Action  |  [i <num>] Inspect Details")
+                print(f"  [n] Next Page  |  [p] Prev Page  |  [s] New Search  |  [b] Back to Main Menu")
+
+                cmd = input("\n  Action > ").strip().lower()
+
+                if cmd in ('b', 'back', 'exit'):
+                    query = None
+                    break
+                elif cmd in ('s', 'search'):
+                    query = None
+                    break
+                elif cmd == 'n':
+                    if page < total_pages - 1:
+                        page += 1
+                    else:
+                        print("  (Already on last page)")
+                elif cmd == 'p':
+                    if page > 0:
+                        page -= 1
+                    else:
+                        print("  (Already on first page)")
+                elif cmd.startswith('i ') or (cmd.startswith('i') and len(cmd) > 1 and cmd[1:].isdigit()):
+                    num_str = cmd[1:].strip()
+                    if num_str.isdigit():
+                        idx = int(num_str) - 1
+                        if 0 <= idx < len(results):
+                            self._inspect_and_action(results[idx])
+                elif cmd.isdigit():
+                    idx = int(cmd) - 1
+                    if 0 <= idx < len(results):
+                        self._inspect_and_action(results[idx])
+                else:
+                    print("  Invalid command. Enter a number or [b]ack.")
+
+    def _inspect_and_action(self, item: SearchResultItem):
+        """Displays detailed inspection card with lyrics, subtitles, and download options"""
+        print(f"\n  ⏳ Inspecting metadata for '{item.title}'...")
+        meta = MediaSearchEngine.inspect_metadata(item.url)
+
+        print(f"\n╭────────────────────────────────────────────────────────────────────────────╮")
+        print(f"│  📋 METADATA & MEDIA INSPECTION CARD                                       │")
+        print(f"├────────────────────────────────────────────────────────────────────────────┤")
+        print(f"│  Title:     {meta.get('title', item.title)[:60]:<60} │")
+        print(f"│  Artist:    {meta.get('artist', item.artist)[:60]:<60} │")
+        if meta.get('album'):
+            print(f"│  Album:     {meta.get('album', '')[:60]:<60} │")
+        print(f"│  Duration:  {meta.get('duration_str', item.duration_str):<60} │")
+        print(f"│  Platform:  {meta.get('platform', item.platform):<60} │")
+
+        if meta.get('has_synced_lyrics'):
+            print(f"│  Lyrics:    ✔ Synchronized Lyrics Available (.lrc file + embedded)       │")
+        elif meta.get('has_plain_lyrics'):
+            print(f"│  Lyrics:    ✔ Plain Lyrics Available (embedded)                          │")
+        else:
+            print(f"│  Lyrics:    ○ Not detected in LRCLIB database                            │")
+
+        subs = meta.get('subtitles') or []
+        if subs:
+            subs_str = ", ".join(subs[:6])
+            print(f"│  Subtitles: ✔ Available languages: {subs_str:<39} │")
+
+        v_fmts = meta.get('video_formats') or []
+        if v_fmts:
+            print(f"│  Video:     {', '.join(v_fmts[:5]):<60} │")
+
+        print(f"╰────────────────────────────────────────────────────────────────────────────╯")
+
+        if meta.get('lyrics_preview'):
+            print(f"\n  📜 Lyrics Preview Snippet:")
+            for line in meta.get('lyrics_preview').splitlines()[:4]:
+                print(f"     {line}")
+
+        if meta.get('is_playlist') or item.media_type in ('album', 'playlist'):
+            print(f"\n  This is a collection with {meta.get('track_count', 1)} tracks.")
+            print(f"  1. 📂 Explore & Select Songs inside this Playlist/Album")
+            print(f"  2. ⚡ Download ALL Tracks (FLAC Lossless)")
+            print(f"  3. 🎧 Download ALL Tracks (320k MP3)")
+            print(f"  4. ↩ Back")
+            act = input("\n  Select Action [1]: ").strip() or "1"
+            if act == '1':
+                self._explore_playlist(item.url, meta.get('title', item.title))
+            elif act == '2':
+                self.downloader.download_spotify(item.url, quality="flac")
+            elif act == '3':
+                self.downloader.download_spotify(item.url, quality="320k")
+            return
+
+        print(f"\n  DOWNLOAD ACTIONS:")
+        print(f"    1. ⚡ Download FLAC (Lossless Studio Quality + Synced Lyrics & Art)")
+        print(f"    2. 🎧 Download MP3 (320 kbps Extreme + Embedded Art & Lyrics)")
+        print(f"    3. 🎬 Download Video (Best Quality MP4)")
+        print(f"    4. ↩ Back to search results")
+
+        act = input("\n  Select Action [1]: ").strip() or "1"
+        if act == '1':
+            self.downloader.download_spotify(item.url, quality="flac")
+            input("\n  Press Enter to continue...")
+        elif act == '2':
+            self.downloader.download_spotify(item.url, quality="320k")
+            input("\n  Press Enter to continue...")
+        elif act == '3':
+            self.downloader.download_video(item.url, quality="best")
+            input("\n  Press Enter to continue...")
+
+    def _explore_playlist(self, url: str, title: str):
+        """Interactive Song Explorer for Playlists and Albums"""
+        print(f"\n  ⏳ Fetching songs inside '{title}'...")
+        tracks = MediaSearchEngine.fetch_playlist_tracks(url)
+        if not tracks:
+            print("  ✖ Could not load tracks for this playlist.")
+            input("\n  Press Enter...")
+            return
+
+        selected_indices = set(range(1, len(tracks) + 1))
+
+        while True:
+            print(f"\n╭────────────────────────────────────────────────────────────────────────────╮")
+            print(f"│  📂 PLAYLIST SONG EXPLORER: {title[:44]:<44} │")
+            print(f"│  {len(selected_indices)}/{len(tracks)} tracks selected                                           │")
+            print(f"╰────────────────────────────────────────────────────────────────────────────╯")
+
+            for t in tracks:
+                idx = t['index']
+                mark = "●" if idx in selected_indices else "○"
+                dur = f"({t.get('duration_str', '0:00')})"
+                print(f"  [{mark}] {idx:2d}. {t.get('artist', '')[:20]:<20} — {t.get('title', '')[:35]:<35} {dur}")
+
+            print(f"\n  COMMANDS:")
+            print(f"    [d] Download selected tracks")
+            print(f"    [all] Select all tracks  |  [none] Deselect all")
+            print(f"    [1,3,5-8] Toggle / specify tracks to select")
+            print(f"    [i <num>] Inspect specific track lyrics/details")
+            print(f"    [b] Back to search results")
+
+            cmd = input("\n  Explorer > ").strip().lower()
+
+            if cmd in ('b', 'back'):
+                break
+            elif cmd in ('all', 'select all'):
+                selected_indices = set(range(1, len(tracks) + 1))
+            elif cmd in ('none', 'deselect all'):
+                selected_indices.clear()
+            elif cmd.startswith('i ') or (cmd.startswith('i') and len(cmd) > 1 and cmd[1:].isdigit()):
+                num_str = cmd[1:].strip()
+                if num_str.isdigit():
+                    t_idx = int(num_str)
+                    target = next((t for t in tracks if t['index'] == t_idx), None)
+                    if target:
+                        self._inspect_and_action(SearchResultItem(
+                            id=str(t_idx),
+                            title=target['title'],
+                            artist=target['artist'],
+                            album=target.get('album', ''),
+                            duration_s=target.get('duration_s', 0),
+                            duration_str=target.get('duration_str', '0:00'),
+                            url=target.get('url', url),
+                            media_type='track'
+                        ))
+            elif cmd in ('d', 'download'):
+                if not selected_indices:
+                    print("  ✖ No tracks selected to download.")
+                    continue
+
+                print("\n  Audio Quality for Selected Tracks:")
+                print("    1. FLAC (Lossless Audio - Synced Lyrics & Art) [Default]")
+                print("    2. MP3 (320 kbps Extreme)")
+                q_choice = input("  Select [1]: ").strip() or "1"
+                quality = "flac" if q_choice == "1" else "320k"
+
+                print(f"\n  ⏳ Downloading {len(selected_indices)} selected track(s) in {quality.upper()}...")
+                selected_tracks = [t for t in tracks if t['index'] in selected_indices]
+                for st in selected_tracks:
+                    print(f"\n  -> [{st['index']}/{len(tracks)}] {st['artist']} - {st['title']}")
+                    self.downloader.download_spotify(st['url'], quality=quality)
+
+                print(f"\n  ✔ Completed downloading {len(selected_indices)} track(s)!")
+                input("\n  Press Enter to continue...")
+                break
+            else:
+                parsed_nums = set()
+                try:
+                    parts = cmd.replace(" ", "").split(",")
+                    for p in parts:
+                        if "-" in p:
+                            s, e = p.split("-", 1)
+                            for n in range(int(s), int(e) + 1):
+                                if 1 <= n <= len(tracks):
+                                    parsed_nums.add(n)
+                        elif p.isdigit():
+                            n = int(p)
+                            if 1 <= n <= len(tracks):
+                                parsed_nums.add(n)
+                    if parsed_nums:
+                        selected_indices = parsed_nums
+                except Exception:
+                    print("  Unrecognized command.")
+
+    def handle_universal_downloader(self):
+        """Option 30: Unknown Media (Video+Audio+Subtitle) Downloader."""
+        if not UNIVERSAL_AVAILABLE:
+            print("\n  [!] Universal Media Downloader module is not available.")
+            input("\n  Press Enter...")
+            return
+
+        clear_screen()
+        self.print_header()
+        UniversalMediaDownloader().interactive_cli()
+
+    def handle_universal_with_url(self, url: str):
+        """Auto-detected webpage/stream URL routed to Universal Downloader."""
+        if not UNIVERSAL_AVAILABLE:
+            print("\n  [!] Universal Media Downloader module is not available.")
+            input("\n  Press Enter...")
+            return
+
+        clear_screen()
+        self.print_header()
+        UniversalMediaDownloader().interactive_cli(url)
+
     # ==================== MAIN LOOP ====================
     
     def run(self):
@@ -3680,6 +4069,13 @@ MAIN MENU:
             '19': self.handle_clear_temp,
             '20': self.handle_update,
             '21': self.handle_feature_settings,
+            '22': self.handle_spotiflac,
+            '23': self.handle_search_explorer,
+            '24': self.handle_universal_downloader,
+            '25': self.handle_universal_downloader,
+            '26': self.handle_universal_downloader,
+            '27': self.handle_search_explorer,
+            '30': self.handle_universal_downloader,
         }
         
         while self.running:
@@ -3690,11 +4086,30 @@ MAIN MENU:
                 
                 choice = input("  Enter choice: ").strip()
                 
+                # ML: log menu selection
+                if ML_LOGGER_AVAILABLE and choice in handlers:
+                    get_ml_logger().log_usage("menu", opt=int(choice))
+                
                 if choice == '0':
                     self.bg_manager.stop()
+                    if ML_LOGGER_AVAILABLE:
+                        get_ml_logger().log_usage("exit")
+                        get_ml_logger().close()
                     print("\n  Goodbye!\n")
                     self.running = False
                 elif self.features['bg_predownload'] and (is_valid_url(choice) or is_supported_url(choice)):
+                    # Auto-detect Spotify / Universal URLs before bg_predownload
+                    if SPOTIFLAC_AVAILABLE and SpotiFLACDownloader.is_spotify_url(choice):
+                        if ML_LOGGER_AVAILABLE:
+                            get_ml_logger().log_usage("auto_detect", kind="spotify")
+                        self.handle_spotiflac_with_url(choice)
+                        continue
+                    elif UNIVERSAL_AVAILABLE and (".mpd" in choice.lower() or ".m3u8" in choice.lower() or detect_platform(choice) == Platform.UNKNOWN):
+                        if ML_LOGGER_AVAILABLE:
+                            get_ml_logger().log_usage("auto_detect", kind="universal")
+                        self.handle_universal_with_url(choice)
+                        continue
+                    
                     # User pasted a URL at the menu (bg_predownload enabled)
                     existing = self.bg_manager.get_job(choice)
 
@@ -3756,6 +4171,8 @@ MAIN MENU:
                     input("\n  Press Enter to continue...")
                 elif choice in handlers:
                     handlers[choice]()
+                elif choice and len(choice.strip()) >= 2:
+                    self.handle_search_explorer(initial_query=choice.strip())
                 else:
                     print("\n  Invalid choice.")
                     input("\n  Press Enter...")

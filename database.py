@@ -12,7 +12,7 @@ from typing import Optional, Dict, List, Any
 from contextlib import contextmanager
 from dataclasses import dataclass, asdict
 
-# Try importing Config for default paths
+# Imports
 try:
     from config import Config as _Cfg
     _DEFAULT_DB_PATH = _Cfg.DATABASE_PATH
@@ -21,26 +21,7 @@ except ImportError:
         os.path.expanduser("~"), "Downloads", "downloader", "downloader.db"
     )
 
-# Try importing utils
-try:
-    from utils import format_size, format_duration, get_logger, ensure_directory
-except ImportError:
-    def format_size(b): 
-        if not b: return "0 B"
-        for u in ['B','KB','MB','GB','TB']:
-            if b < 1024: return f"{b:.2f} {u}"
-            b /= 1024
-        return f"{b:.2f} PB"
-    def format_duration(s): 
-        if not s: return "00:00"
-        h, m, s = int(s//3600), int((s%3600)//60), int(s%60)
-        return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
-    def get_logger(): 
-        import logging
-        return logging.getLogger("database")
-    def ensure_directory(p): 
-        os.makedirs(p, exist_ok=True)
-        return True
+from utils import format_size, format_duration, get_logger, ensure_directory
 
 logger = get_logger()
 
@@ -172,33 +153,7 @@ class DatabaseManager:
                     )
                 ''')
                 
-                # Playlists table
-                c.execute('''
-                    CREATE TABLE IF NOT EXISTS playlists (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        url TEXT UNIQUE NOT NULL,
-                        title TEXT,
-                        uploader TEXT,
-                        platform TEXT,
-                        video_count INTEGER DEFAULT 0,
-                        downloaded_count INTEGER DEFAULT 0,
-                        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                ''')
-                
-                # History table
-                c.execute('''
-                    CREATE TABLE IF NOT EXISTS history (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        download_id INTEGER,
-                        action TEXT NOT NULL,
-                        details TEXT,
-                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        FOREIGN KEY (download_id) REFERENCES downloads(id) ON DELETE CASCADE
-                    )
-                ''')
-                
-                # Queue table - SIMPLE version
+                # Queue table
                 c.execute('''
                     CREATE TABLE IF NOT EXISTS queue (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -209,12 +164,23 @@ class DatabaseManager:
                     )
                 ''')
                 
-                # Settings table
+                # Active tasks table (for chunked download pause/resume/edit)
                 c.execute('''
-                    CREATE TABLE IF NOT EXISTS settings (
-                        key TEXT PRIMARY KEY,
-                        value TEXT,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    CREATE TABLE IF NOT EXISTS active_tasks (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        url TEXT NOT NULL,
+                        filepath TEXT NOT NULL,
+                        filename TEXT DEFAULT '',
+                        total_size INTEGER DEFAULT 0,
+                        downloaded INTEGER DEFAULT 0,
+                        chunks_json TEXT DEFAULT '[]',
+                        status TEXT DEFAULT 'pending',
+                        headers_json TEXT DEFAULT '{}',
+                        thread_count INTEGER DEFAULT 8,
+                        etag TEXT DEFAULT '',
+                        error TEXT DEFAULT '',
+                        created_at TEXT DEFAULT '',
+                        updated_at TEXT DEFAULT ''
                     )
                 ''')
                 
@@ -222,16 +188,15 @@ class DatabaseManager:
                 c.execute('CREATE INDEX IF NOT EXISTS idx_downloads_url ON downloads(url)')
                 c.execute('CREATE INDEX IF NOT EXISTS idx_downloads_status ON downloads(status)')
                 c.execute('CREATE INDEX IF NOT EXISTS idx_queue_status ON queue(status)')
+                c.execute('CREATE INDEX IF NOT EXISTS idx_active_tasks_status ON active_tasks(status)')
     
     def _run_migrations(self):
-        """Run database migrations for schema updates"""
+        """Run database migrations for schema updates if needed"""
         with self._lock:
             with self._cursor() as c:
-                # Get existing columns in downloads table
                 c.execute("PRAGMA table_info(downloads)")
                 download_cols = {row['name'] for row in c.fetchall()}
                 
-                # Add missing columns to downloads
                 new_cols = [
                     ("media_type", "TEXT DEFAULT 'video'"),
                     ("error_message", "TEXT"),
@@ -246,16 +211,8 @@ class DatabaseManager:
                     if col_name not in download_cols:
                         try:
                             c.execute(f"ALTER TABLE downloads ADD COLUMN {col_name} {col_def}")
-                        except:
+                        except Exception:
                             pass
-                
-                # Get existing columns in queue table
-                c.execute("PRAGMA table_info(queue)")
-                queue_cols = {row['name'] for row in c.fetchall()}
-                
-                # Check if queue table needs to be recreated
-                # If it has old columns, just work with what we have
-                # The simple queue only needs: id, url, priority, status, added_date
     
     def close(self):
         if hasattr(self._local, 'conn') and self._local.conn:
@@ -416,33 +373,38 @@ class DatabaseManager:
     def get_statistics(self) -> Dict:
         """Get statistics"""
         with self._cursor() as c:
-            stats = {}
-            
-            c.execute("SELECT COUNT(*) as n FROM downloads WHERE status = 'complete'")
-            stats['total_downloads'] = c.fetchone()['n']
-            
-            c.execute("SELECT COALESCE(SUM(filesize), 0) as s FROM downloads WHERE status = 'complete'")
-            size = c.fetchone()['s']
-            stats['total_size_bytes'] = size
-            stats['total_size_human'] = format_size(size)
-            
-            c.execute("SELECT COALESCE(SUM(duration), 0) as d FROM downloads WHERE status = 'complete'")
-            dur = c.fetchone()['d']
-            stats['total_duration'] = format_duration(dur)
+            # Consolidated aggregate statistics in single query
+            c.execute("""
+                SELECT 
+                    COUNT(CASE WHEN status = 'complete' THEN 1 END) as total_downloads,
+                    COALESCE(SUM(CASE WHEN status = 'complete' THEN filesize END), 0) as total_size,
+                    COALESCE(SUM(CASE WHEN status = 'complete' THEN duration END), 0) as total_duration,
+                    COUNT(CASE WHEN status = 'failed' THEN 1 END) as failed_downloads
+                FROM downloads
+            """)
+            row = c.fetchone()
+            total_dl = row['total_downloads']
+            total_size = row['total_size']
+            total_dur = row['total_duration']
+            failed_dl = row['failed_downloads']
             
             c.execute("""
                 SELECT platform, COUNT(*) as n FROM downloads 
-                WHERE status = 'complete' AND platform IS NOT NULL
+                WHERE status = 'complete' AND platform IS NOT NULL AND platform != ''
                 GROUP BY platform ORDER BY n DESC
             """)
-            stats['by_platform'] = {r['platform']: r['n'] for r in c.fetchall()}
+            by_platform = {r['platform']: r['n'] for r in c.fetchall()}
             
-            c.execute("SELECT COUNT(*) as n FROM downloads WHERE status = 'failed'")
-            stats['failed_downloads'] = c.fetchone()['n']
-            
-            return stats
+            return {
+                'total_downloads': total_dl,
+                'total_size_bytes': total_size,
+                'total_size_human': format_size(total_size),
+                'total_duration': format_duration(total_dur),
+                'by_platform': by_platform,
+                'failed_downloads': failed_dl,
+            }
     
-    # ==================== QUEUE (Simplified) ====================
+    # ==================== QUEUE ====================
     
     def add_to_queue(self, url: str, priority: int = 0) -> int:
         """Add to queue"""
@@ -498,115 +460,73 @@ class DatabaseManager:
             c.execute("SELECT COUNT(*) as n FROM queue WHERE status = ?", (status,))
             return c.fetchone()['n']
     
-    # ==================== PLAYLISTS ====================
+    # ==================== ACTIVE TASKS (Chunked Download Management) ====================
     
-    def add_playlist(self, url: str, title: str, uploader: str = None, 
-                     platform: str = None, video_count: int = 0) -> int:
-        """Add/update playlist"""
+    def add_task(self, url: str, filepath: str, filename: str = '',
+                 total_size: int = 0, chunks_json: str = '[]',
+                 headers_json: str = '{}', thread_count: int = 8,
+                 etag: str = '', status: str = 'pending') -> int:
+        """Add an active download task for pause/resume tracking."""
+        now = datetime.now().isoformat()
         with self._lock:
             with self._cursor() as c:
                 c.execute("""
-                    INSERT INTO playlists (url, title, uploader, platform, video_count, last_updated)
-                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    ON CONFLICT(url) DO UPDATE SET
-                        title = excluded.title,
-                        uploader = excluded.uploader,
-                        platform = excluded.platform,
-                        video_count = excluded.video_count,
-                        last_updated = CURRENT_TIMESTAMP
-                """, (url, title, uploader, platform, video_count))
+                    INSERT INTO active_tasks
+                        (url, filepath, filename, total_size, downloaded,
+                         chunks_json, status, headers_json, thread_count,
+                         etag, error, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, '', ?, ?)
+                """, (url, filepath, filename, total_size,
+                      chunks_json, status, headers_json, thread_count,
+                      etag, now, now))
                 return c.lastrowid
     
-    def update_playlist_progress(self, url: str, downloaded: int) -> bool:
-        """Update playlist progress"""
+    def update_task(self, task_id: int, **kwargs) -> bool:
+        """Update any subset of columns on an active task."""
+        if not kwargs:
+            return False
+        allowed = {
+            'url', 'filepath', 'filename', 'total_size', 'downloaded',
+            'chunks_json', 'status', 'headers_json', 'thread_count',
+            'etag', 'error',
+        }
+        cols = {k: v for k, v in kwargs.items() if k in allowed}
+        if not cols:
+            return False
+        cols['updated_at'] = datetime.now().isoformat()
+        set_clause = ", ".join(f"{k} = ?" for k in cols)
+        values = list(cols.values()) + [task_id]
         with self._lock:
             with self._cursor() as c:
-                c.execute("UPDATE playlists SET downloaded_count = ?, last_updated = CURRENT_TIMESTAMP WHERE url = ?", (downloaded, url))
+                c.execute(f"UPDATE active_tasks SET {set_clause} WHERE id = ?", values)
                 return c.rowcount > 0
     
-    # ==================== HISTORY ====================
-    
-    def add_history(self, download_id: int, action: str, details: str = None) -> int:
-        """Add history entry"""
-        with self._lock:
-            with self._cursor() as c:
-                c.execute("INSERT INTO history (download_id, action, details) VALUES (?, ?, ?)", (download_id, action, details))
-                return c.lastrowid
-    
-    def get_history(self, download_id: int = None, limit: int = 100) -> List[Dict]:
-        """Get history"""
+    def get_task(self, task_id: int) -> Optional[Dict]:
+        """Get a single active task by ID."""
         with self._cursor() as c:
-            if download_id:
-                c.execute("""
-                    SELECT h.*, d.title, d.url FROM history h
-                    LEFT JOIN downloads d ON h.download_id = d.id
-                    WHERE h.download_id = ? ORDER BY h.timestamp DESC LIMIT ?
-                """, (download_id, limit))
+            c.execute("SELECT * FROM active_tasks WHERE id = ?", (task_id,))
+            row = c.fetchone()
+            return dict(row) if row else None
+    
+    def get_all_tasks(self, status: str = None) -> List[Dict]:
+        """Get all active tasks, optionally filtered by status."""
+        with self._cursor() as c:
+            if status:
+                c.execute("SELECT * FROM active_tasks WHERE status = ? ORDER BY updated_at DESC", (status,))
             else:
-                c.execute("""
-                    SELECT h.*, d.title, d.url FROM history h
-                    LEFT JOIN downloads d ON h.download_id = d.id
-                    ORDER BY h.timestamp DESC LIMIT ?
-                """, (limit,))
+                c.execute("SELECT * FROM active_tasks ORDER BY updated_at DESC")
             return [dict(r) for r in c.fetchall()]
     
-    # ==================== SETTINGS ====================
+    def get_paused_tasks(self) -> List[Dict]:
+        """Shorthand to get all paused tasks."""
+        return self.get_all_tasks(status='paused')
     
-    def set_setting(self, key: str, value: Any) -> bool:
-        """Set setting"""
+    def delete_task(self, task_id: int) -> bool:
+        """Delete an active task."""
         with self._lock:
             with self._cursor() as c:
-                c.execute("""
-                    INSERT INTO settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
-                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
-                """, (key, json.dumps(value)))
-                return True
-    
-    def get_setting(self, key: str, default: Any = None) -> Any:
-        """Get setting"""
-        with self._cursor() as c:
-            c.execute("SELECT value FROM settings WHERE key = ?", (key,))
-            row = c.fetchone()
-            if row:
-                try:
-                    return json.loads(row['value'])
-                except:
-                    return row['value']
-            return default
-    
-    # ==================== MAINTENANCE ====================
-    
-    def vacuum(self):
-        """Optimize database"""
-        with self._lock:
-            self._conn.execute("VACUUM")
-    
-    def get_db_size(self) -> int:
-        """Get database size"""
-        try:
-            return os.path.getsize(self.db_path)
-        except:
-            return 0
-    
-    def backup(self, backup_path: str) -> bool:
-        """Backup database"""
-        try:
-            import shutil
-            shutil.copy2(self.db_path, backup_path)
-            return True
-        except:
-            return False
-    
-    def export_json(self, filepath: str) -> bool:
-        """Export to JSON"""
-        try:
-            downloads = self.get_downloads(limit=100000)
-            data = [d.to_dict() for d in downloads]
-            with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False, default=str)
-            return True
-        except:
-            return False
+                c.execute("DELETE FROM active_tasks WHERE id = ?", (task_id,))
+                return c.rowcount > 0
 
 
 # Global instance

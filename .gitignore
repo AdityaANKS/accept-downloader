@@ -21,15 +21,37 @@ settings.json
 feature_settings.json
 download_archive.txt
 
+# ML training logs
+ml_training*.jsonl*
+
 # Media Output / Download Directories
+downloads/
 cookies/
 videos/
 audios/
+music/
+streams/
+files/
+cdm/
+unknown/
 thumbnails/
 subtitles/
 images/
 temp/
 text/
+
+# Private credentials, certificates & DRM CDM devices
+*.pem
+*.key
+*.bin
+*.wvd
+*.p12
+*.pfx
+1836941661.zip
+/*.zip
+.env*
+*credential*
+*secret*
 
 # IDE / Editor Files
 .vscode/
@@ -39,3 +61,8 @@ text/
 *.njsproj
 *.sln
 *.swp
+
+# Antigravity & Agent files
+.agents/
+skills-lock.json
+

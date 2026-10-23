@@ -1,0 +1,627 @@
+<!DOCTYPE html>
+<html class="dark" lang="en">
+<head>
+    <meta charset="utf-8"/>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+    <title>VAULT — Media Downloader</title>
+    <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;900&amp;family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+    <script id="tailwind-config">
+        tailwind.config = {
+          darkMode: "class",
+          theme: {
+            extend: {
+              "colors": {
+                      "secondary-fixed": "#d8e2ff",
+                      "tertiary-container": "#fc7c78",
+                      "on-secondary": "#002e6a",
+                      "on-tertiary-fixed-variant": "#842225",
+                      "on-primary-fixed": "#002113",
+                      "outline": "#86948a",
+                      "secondary": "#adc6ff",
+                      "surface-bright": "#343b36",
+                      "error-container": "#93000a",
+                      "on-secondary-fixed": "#001a42",
+                      "on-background": "#dde4dd",
+                      "tertiary": "#ffb3af",
+                      "on-surface": "#dde4dd",
+                      "on-primary": "#003824",
+                      "surface-variant": "#2f3632",
+                      "inverse-surface": "#dde4dd",
+                      "surface-container-highest": "#2f3632",
+                      "tertiary-fixed-dim": "#ffb3af",
+                      "on-tertiary-container": "#711419",
+                      "secondary-container": "#0566d9",
+                      "on-primary-fixed-variant": "#005236",
+                      "surface-container": "#1a211d",
+                      "on-error": "#690005",
+                      "background": "#0e1511",
+                      "primary": "#4edea3",
+                      "error": "#ffb4ab",
+                      "on-secondary-container": "#e6ecff",
+                      "outline-variant": "#3c4a42",
+                      "primary-fixed-dim": "#4edea3",
+                      "surface-tint": "#4edea3",
+                      "surface-container-lowest": "#09100c",
+                      "primary-container": "#10b981",
+                      "on-tertiary-fixed": "#410005",
+                      "on-tertiary": "#650911",
+                      "surface-container-high": "#242c27",
+                      "secondary-fixed-dim": "#adc6ff",
+                      "surface-container-low": "#161d19",
+                      "on-surface-variant": "#bbcabf",
+                      "inverse-on-surface": "#2b322d",
+                      "on-primary-container": "#00422b",
+                      "primary-fixed": "#6ffbbe",
+                      "surface-dim": "#0e1511",
+                      "on-error-container": "#ffdad6",
+                      "on-secondary-fixed-variant": "#004395",
+                      "tertiary-fixed": "#ffdad7",
+                      "inverse-primary": "#006c49",
+                      "surface": "#0e1511"
+              },
+              "borderRadius": {
+                      "DEFAULT": "0.125rem",
+                      "lg": "0.25rem",
+                      "xl": "0.5rem",
+                      "full": "0.75rem"
+              },
+              "fontFamily": {
+                      "display-lg": ["Inter"],
+                      "mono-data": ["monospace"],
+                      "headline-md": ["Inter"],
+                      "body-sm": ["Inter"],
+                      "body-base": ["Inter"],
+                      "label-caps": ["Inter"]
+              }
+            },
+          },
+        }
+    </script>
+    <style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .active-glow {
+            box-shadow: 0 0 15px rgba(78, 222, 163, 0.15);
+        }
+        body {
+            min-height: max(884px, 100dvh);
+        }
+        /* Fix the dropdown indicator in tailwind forms */
+        select {
+            -webkit-appearance: none;
+            -moz-appearance: none;
+            appearance: none;
+        }
+        #toast {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            padding: 15px 25px;
+            border-radius: 8px;
+            transform: translateY(150%);
+            transition: transform 0.3s;
+            z-index: 1000;
+        }
+        #toast.show { transform: translateY(0); }
+        .toast-success { background: #1a211d; border-left: 4px solid #10b981; color: #fff;}
+        .toast-error { background: #1a211d; border-left: 4px solid #ffb4ab; color: #fff;}
+    </style>
+</head>
+<body class="bg-background text-on-background font-body-base selection:bg-primary selection:text-on-primary">
+
+    <!-- TopAppBar Shell -->
+    <header class="bg-slate-950 text-emerald-500 font-inter tracking-tight antialiased docked full-width top-0 border-b border-slate-800 flex justify-between items-center h-14 px-4 w-full z-50 fixed">
+        <div class="flex items-center gap-4">
+            <h1 class="text-xl font-black tracking-tighter text-emerald-500">VAULT</h1>
+        </div>
+        <div class="flex items-center gap-4">
+            <span class="text-xs text-outline" id="footerInfo">Powered by yt-dlp</span>
+        </div>
+    </header>
+
+    <!-- NavigationDrawer Shell -->
+    <aside class="fixed left-0 top-0 h-screen flex flex-col z-40 bg-slate-900 h-full w-64 border-r border-slate-800 pt-14">
+        <div class="text-2xl font-black text-emerald-500 p-6">VAULT</div>
+        <nav class="flex-1 font-inter text-sm font-medium space-y-1 px-3">
+            <button id="navDirectLink" onclick="switchMainTab('url')" class="w-full text-left bg-slate-800/50 text-emerald-500 border-l-4 border-emerald-500 px-4 py-3 flex items-center gap-3 rounded-r transition-all">
+                <span class="material-symbols-outlined" data-icon="download">download</span>
+                Downloader
+            </button>
+            <button id="navSearch" onclick="switchMainTab('search')" class="w-full text-left text-outline hover:text-white hover:bg-slate-800/30 px-4 py-3 flex items-center gap-3 rounded-r transition-all">
+                <span class="material-symbols-outlined" data-icon="travel_explore">travel_explore</span>
+                Search Explorer
+            </button>
+            <button id="navUniversal" onclick="switchMainTab('universal')" class="w-full text-left text-outline hover:text-white hover:bg-slate-800/30 px-4 py-3 flex items-center gap-3 rounded-r transition-all">
+                <span class="material-symbols-outlined" data-icon="screen_search_desktop">screen_search_desktop</span>
+                Unknown Media Sniffer
+            </button>
+        </nav>
+        
+        <!-- Stats widget -->
+        <div class="p-6 border-t border-slate-800">
+            <div class="text-xs text-outline mb-2">Total Downloads: <span id="statTotal" class="text-primary font-mono-data">0</span></div>
+            <div class="text-xs text-outline mb-2">Total Size: <span id="statSize" class="text-primary font-mono-data">0 B</span></div>
+        </div>
+    </aside>
+
+    <!-- Main Content Canvas -->
+    <main class="ml-64 pt-20 p-6 max-w-6xl mx-auto space-y-6">
+
+        <!-- Mode Selector: URL vs Search vs Universal -->
+        <div class="flex flex-wrap gap-2 border-b border-outline-variant pb-3">
+            <button id="tabUrlMode" onclick="switchMainTab('url')" class="px-5 py-2.5 rounded font-bold text-sm bg-primary text-on-primary shadow flex items-center gap-2 transition-all">
+                <span class="material-symbols-outlined text-base" data-icon="link">link</span>
+                Direct Link
+            </button>
+            <button id="tabSearchMode" onclick="switchMainTab('search')" class="px-5 py-2.5 rounded font-bold text-sm bg-surface-container-highest text-outline hover:text-white flex items-center gap-2 transition-all">
+                <span class="material-symbols-outlined text-base" data-icon="search">search</span>
+                Search Explorer
+            </button>
+            <button id="tabUniversalMode" onclick="switchMainTab('universal')" class="px-5 py-2.5 rounded font-bold text-sm bg-surface-container-highest text-outline hover:text-white flex items-center gap-2 transition-all">
+                <span class="material-symbols-outlined text-base" data-icon="screen_search_desktop">screen_search_desktop</span>
+                Unknown Media Sniffer
+            </button>
+        </div>
+
+        <!-- 1. DIRECT URL SECTION -->
+        <div id="urlModeContainer" class="space-y-4">
+            <button id="btnClipboard" onclick="pasteFromClipboard()" class="w-full bg-primary text-on-primary py-6 px-8 rounded-lg flex flex-col items-center justify-center gap-2 font-bold active:scale-[0.98] transition-transform shadow-lg active-glow hover:brightness-110">
+                <div class="flex items-center gap-3">
+                    <span class="material-symbols-outlined text-3xl" data-icon="content_paste">content_paste</span>
+                    <span class="text-xl">Click to paste video or music link from clipboard</span>
+                </div>
+                <span class="font-mono-data text-xs opacity-80">(Ctrl + V)</span>
+            </button>
+
+            <!-- URL Input Area -->
+            <div class="flex gap-2 p-2 bg-surface-container-low rounded-lg border border-outline-variant">
+                <div class="relative flex-1 flex items-center bg-background rounded border border-transparent focus-within:border-primary transition-colors">
+                    <span class="material-symbols-outlined absolute left-3 text-outline" data-icon="link">link</span>
+                    <input id="urlInput" class="w-full bg-transparent border-none focus:ring-0 text-body-base py-3 pl-10 pr-4 placeholder:text-outline/50 outline-none" placeholder="Paste YouTube, Spotify (FLAC/MP3), TikTok, Instagram, or media URL..." type="text"/>
+                </div>
+                <button id="btnFetch" onclick="fetchInfo()" class="bg-surface-container-highest hover:bg-surface-bright text-primary font-bold px-8 rounded transition-colors flex items-center gap-2 disabled:opacity-50">
+                    GO
+                    <span class="material-symbols-outlined" data-icon="arrow_forward">arrow_forward</span>
+                </button>
+            </div>
+            <div id="errorMsg" class="text-error bg-error-container p-3 rounded text-sm hidden"></div>
+        </div>
+
+        <!-- 2. SEARCH & PLAYLIST EXPLORER SECTION -->
+        <div id="searchModeContainer" class="space-y-4 hidden">
+            <div class="p-6 bg-surface-container-low rounded-lg border border-outline-variant space-y-4">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h2 class="text-xl font-bold text-white flex items-center gap-2">
+                            <span class="material-symbols-outlined text-primary" data-icon="travel_explore">travel_explore</span>
+                            Media & Music Search Engine
+                        </h2>
+                        <p class="text-xs text-outline mt-1">Search Spotify, YouTube Music, and YouTube without tokens. Inspect synced lyrics, subtitles & browse playlists.</p>
+                    </div>
+                    <!-- Type Filter Pills -->
+                    <div class="flex gap-2 bg-surface-container-lowest p-1 rounded-lg border border-outline-variant text-xs">
+                        <button id="filterAll" onclick="setSearchFilter('all')" class="px-3 py-1.5 rounded font-bold bg-primary text-on-primary transition-all">All</button>
+                        <button id="filterMusic" onclick="setSearchFilter('music')" class="px-3 py-1.5 rounded font-bold text-outline hover:text-white transition-all">🎵 Music (FLAC/320k)</button>
+                        <button id="filterVideo" onclick="setSearchFilter('video')" class="px-3 py-1.5 rounded font-bold text-outline hover:text-white transition-all">🎬 Videos</button>
+                    </div>
+                </div>
+
+                <div class="flex gap-2">
+                    <div class="relative flex-1 flex items-center bg-background rounded border border-transparent focus-within:border-primary transition-colors">
+                        <span class="material-symbols-outlined absolute left-3 text-outline" data-icon="search">search</span>
+                        <input id="searchInput" onkeydown="if(event.key==='Enter') executeSearch()" class="w-full bg-transparent border-none focus:ring-0 text-body-base py-3 pl-10 pr-4 placeholder:text-outline/50 outline-none" placeholder="Search song, artist, album, playlist, or video title..." type="text"/>
+                    </div>
+                    <button id="btnSearch" onclick="executeSearch()" class="bg-primary text-on-primary font-bold px-8 rounded hover:brightness-110 transition-all flex items-center gap-2">
+                        Search
+                        <span class="material-symbols-outlined text-base" data-icon="search">search</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Search Results Area -->
+            <div id="searchResultsSection" class="hidden space-y-4">
+                <div class="flex justify-between items-center border-b border-outline-variant pb-2">
+                    <h3 id="searchResultsCount" class="font-bold text-lg text-white">Results</h3>
+                    <span class="text-xs text-outline font-mono-data">Click card to inspect details or explore playlist</span>
+                </div>
+                <div id="searchResultsGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <!-- Dynamic Search Cards injected here -->
+                </div>
+            </div>
+        </div>
+
+        <!-- 5. UNKNOWN MEDIA (VIDEO+AUDIO+SUBTITLES) SNIFFER SECTION -->
+        <div id="universalModeContainer" class="space-y-6 hidden">
+            <!-- Header Banner -->
+            <div class="p-6 bg-surface-container-low rounded-lg border border-outline-variant space-y-4">
+                <div class="flex flex-wrap items-center justify-between gap-4">
+                    <div>
+                        <div class="flex items-center gap-2">
+                            <h2 class="text-xl font-bold text-white flex items-center gap-2">
+                                <span class="material-symbols-outlined text-primary" data-icon="screen_search_desktop">screen_search_desktop</span>
+                                Unknown Video+Audio+Subtitle Downloader
+                            </h2>
+                            <span class="px-2.5 py-0.5 text-xs rounded-full font-bold bg-primary/20 text-primary border border-primary/30 flex items-center gap-1">
+                                <span class="w-2 h-2 rounded-full bg-primary animate-pulse"></span> Playwright Sniffer Ready
+                            </span>
+                        </div>
+                        <p class="text-xs text-outline mt-1">
+                            Sniffs embedded players, nested iframes, and dynamic JavaScript loaders • Captures HLS (.m3u8), DASH (.mpd), direct media & subtitles (.vtt/.srt) • Lossless FFmpeg (-c copy) muxing
+                        </p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Paste URL & Analyze Input -->
+            <div class="p-6 bg-surface-container rounded-lg border border-outline-variant space-y-4">
+                <button onclick="pasteToUniversalInput()" class="w-full bg-primary/10 hover:bg-primary/20 border border-primary/30 text-primary py-3 px-4 rounded-lg flex items-center justify-center gap-2 font-bold text-sm transition-all">
+                    <span class="material-symbols-outlined text-lg" data-icon="content_paste">content_paste</span>
+                    Paste Webpage or Stream URL from Clipboard
+                </button>
+
+                <div class="flex gap-2">
+                    <div class="relative flex-1 flex items-center bg-background rounded border border-transparent focus-within:border-primary transition-colors">
+                        <span class="material-symbols-outlined absolute left-3 text-outline" data-icon="link">link</span>
+                        <input id="uniUrlInput" onkeydown="if(event.key==='Enter') sniffUniversal()" class="w-full bg-transparent border-none focus:ring-0 text-body-base py-3 pl-10 pr-4 placeholder:text-outline/50 outline-none text-white" placeholder="Paste any webpage URL, embedded video player link, blog, or manifest (.m3u8, .mpd, .mp4)..." type="text"/>
+                    </div>
+                    <button id="btnUniSniff" onclick="sniffUniversal()" class="bg-primary text-on-primary font-bold px-8 rounded hover:brightness-110 transition-all flex items-center gap-2 disabled:opacity-50">
+                        <span id="uniBtnIcon" class="material-symbols-outlined text-lg" data-icon="travel_explore">travel_explore</span>
+                        <span id="uniBtnText">Analyze</span>
+                    </button>
+                </div>
+
+                <!-- Error Box -->
+                <div id="uniErrorMsg" class="hidden text-error bg-error-container p-3 rounded text-sm flex items-center justify-between">
+                    <span id="uniErrorText"></span>
+                    <button onclick="$('uniErrorMsg').classList.add('hidden')" class="text-xs text-error font-bold">DISMISS</button>
+                </div>
+            </div>
+
+            <!-- Scanning Status Box -->
+            <div id="uniScanningBox" class="hidden p-6 bg-surface-container rounded-lg border border-primary/40 space-y-4">
+                <div class="flex items-center gap-4">
+                    <div class="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin"></div>
+                    <div>
+                        <h4 class="text-sm font-bold text-white">Automated Stream Discovery in Progress...</h4>
+                        <p id="uniScanningStatus" class="text-xs text-primary font-mono-data mt-0.5">Launching headless browser and inspecting network traffic...</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Stream Candidate Inspection & Track Selection Card -->
+            <div id="uniResultsCard" class="hidden p-6 bg-surface-container rounded-lg border border-outline-variant space-y-6">
+                <!-- Stream Header -->
+                <div class="flex flex-wrap items-start justify-between gap-4 border-b border-outline-variant pb-4">
+                    <div class="space-y-1">
+                        <div class="flex items-center gap-2">
+                            <span id="uniStreamTypeBadge" class="px-2 py-0.5 text-xs font-bold font-mono-data bg-primary text-on-primary rounded">HLS</span>
+                            <h3 id="uniStreamTitle" class="text-lg font-bold text-white">Discovered Media Stream</h3>
+                        </div>
+                        <div class="flex items-center gap-4 text-xs text-outline font-mono-data">
+                            <span id="uniStreamDuration">Duration: --:--</span>
+                            <span id="uniStreamCandidatesCount">Streams Found: 1</span>
+                        </div>
+                    </div>
+                    <!-- Candidate Switcher (if >1 stream found) -->
+                    <div id="uniCandidateSwitcher" class="hidden flex items-center gap-2">
+                        <label class="text-xs font-bold text-outline">SWITCH STREAM:</label>
+                        <select id="uniCandidateSelect" onchange="onSwitchUniversalCandidate()" class="bg-surface-container-lowest border border-outline-variant rounded p-2 text-xs text-white outline-none">
+                        </select>
+                    </div>
+                </div>
+
+                <!-- DRM Warning Banner -->
+                <div id="uniDrmBanner" class="hidden bg-amber-950/50 border border-amber-500/50 p-4 rounded-lg flex items-start gap-3">
+                    <span class="material-symbols-outlined text-amber-400 text-xl" data-icon="lock">lock</span>
+                    <div>
+                        <h4 class="text-sm font-bold text-amber-300">DRM Encryption Detected</h4>
+                        <p id="uniDrmNotice" class="text-xs text-amber-200/80 mt-1">
+                            This stream is protected with DRM encryption (Widevine / PlayReady / FairPlay). DRM-protected streams cannot be downloaded directly.
+                        </p>
+                    </div>
+                </div>
+
+                <!-- Tracks & Qualities Form -->
+                <div id="uniDownloadControls" class="space-y-5">
+                    <!-- 1. Video Quality Selection -->
+                    <div class="space-y-2">
+                        <div class="flex items-center justify-between">
+                            <label class="text-xs font-bold text-outline tracking-wider uppercase">1. Select Video Quality / Resolution</label>
+                            <span id="uniSelectedQualityLabel" class="text-xs text-primary font-bold font-mono-data">Best (1080p)</span>
+                        </div>
+                        <div id="uniQualityPills" class="flex flex-wrap gap-2">
+                            <!-- Injected dynamically: buttons for 2160p, 1440p, 1080p, 720p, 480p, 360p, Audio-Only -->
+                        </div>
+                    </div>
+
+                    <!-- 2. Audio Track Selection -->
+                    <div id="uniAudioTrackWrapper" class="space-y-2">
+                        <label class="text-xs font-bold text-outline tracking-wider uppercase">2. Audio Track / Rendition</label>
+                        <select id="uniAudioSelect" class="w-full bg-surface-container-lowest border border-outline-variant rounded p-3 text-sm text-white outline-none focus:border-primary">
+                            <option value="">Default Audio Stream</option>
+                        </select>
+                    </div>
+
+                    <!-- 3. Subtitles Selection -->
+                    <div id="uniSubtitlesWrapper" class="space-y-2">
+                        <div class="flex items-center justify-between">
+                            <label class="text-xs font-bold text-outline tracking-wider uppercase">3. Subtitles (Embedded & Captured)</label>
+                            <div class="flex gap-2">
+                                <button type="button" onclick="setAllUniversalSubs(true)" class="text-xs text-primary hover:underline">Select All</button>
+                                <span class="text-outline text-xs">•</span>
+                                <button type="button" onclick="setAllUniversalSubs(false)" class="text-xs text-outline hover:underline">Clear All</button>
+                            </div>
+                        </div>
+                        <div id="uniSubtitlesList" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 bg-surface-container-lowest p-3 rounded border border-outline-variant max-h-40 overflow-y-auto">
+                            <!-- Injected dynamically -->
+                            <div class="text-xs text-outline italic col-span-3">No subtitles detected for this stream.</div>
+                        </div>
+                    </div>
+
+                    <!-- 4. Container Format -->
+                    <div class="space-y-2">
+                        <label class="text-xs font-bold text-outline tracking-wider uppercase">4. Mux Container Format</label>
+                        <div class="flex gap-4">
+                            <label class="flex items-center gap-2 cursor-pointer text-sm">
+                                <input type="radio" name="uniOutputFormat" value="mkv" checked class="text-primary focus:ring-primary bg-background border-outline"/>
+                                <span class="text-white font-medium">MKV (Recommended — supports all audio/subs lossless)</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer text-sm">
+                                <input type="radio" name="uniOutputFormat" value="mp4" class="text-primary focus:ring-primary bg-background border-outline"/>
+                                <span class="text-white font-medium">MP4</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- Download Trigger Button -->
+                    <div class="pt-2">
+                        <button id="btnUniStartDownload" onclick="startUniversalDownload()" class="w-full bg-primary text-on-primary py-4 rounded-lg font-bold hover:brightness-110 active:scale-95 transition-all flex items-center justify-center gap-2 text-base shadow-lg">
+                            <span class="material-symbols-outlined text-xl" data-icon="download">download</span>
+                            Download & Mux Tracks via FFmpeg
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Download Progress Section -->
+            <div id="uniProgressSection" class="hidden bg-surface-container rounded-lg border border-primary/40 p-6 text-center space-y-4">
+                <div id="uniProgressStatus" class="text-primary font-medium">Downloading stream...</div>
+                <div class="w-full bg-surface-container-highest h-2.5 rounded-full overflow-hidden">
+                    <div id="uniProgressBarFill" class="bg-primary h-full w-[0%] transition-all duration-300"></div>
+                </div>
+                <div class="flex justify-between text-sm font-mono-data text-outline">
+                    <span id="uniProgPercent" class="text-primary font-bold">0%</span>
+                    <span id="uniProgSpeed">---</span>
+                    <span id="uniProgSize">--- / ---</span>
+                    <span id="uniProgEta">ETA: ---</span>
+                </div>
+            </div>
+
+            <!-- Download Complete Section -->
+            <div id="uniCompleteSection" class="hidden bg-surface-container rounded-lg border border-outline-variant p-8 text-center space-y-4">
+                <span class="material-symbols-outlined text-5xl text-primary block" data-icon="check_circle">check_circle</span>
+                <h3 id="uniCompleteTitle" class="text-xl font-bold text-primary">Download & Muxing Complete!</h3>
+                <div id="uniCompleteDetail" class="text-sm text-outline font-mono-data"></div>
+                <button onclick="resetUniversalUI()" class="bg-primary text-on-primary px-6 py-2.5 rounded font-bold hover:brightness-110">Download Another Video</button>
+            </div>
+        </div>
+
+        <!-- PLAYLIST SONG EXPLORER MODAL -->
+        <div id="playlistModal" class="hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+            <div class="bg-surface-container rounded-xl border border-outline-variant max-w-4xl w-full max-h-[90vh] flex flex-col overflow-hidden shadow-2xl animate-fade-in">
+                <!-- Modal Header -->
+                <div class="p-6 border-b border-outline-variant flex items-center justify-between bg-surface-container-low">
+                    <div class="flex items-center gap-4">
+                        <img id="playlistModalThumb" class="w-16 h-16 rounded-lg object-cover border border-outline-variant bg-surface-container-lowest" src="" alt="Cover"/>
+                        <div>
+                            <span class="text-xs font-bold text-primary tracking-widest uppercase" id="playlistModalType">PLAYLIST EXPLORER</span>
+                            <h3 id="playlistModalTitle" class="text-xl font-bold text-white line-clamp-1"></h3>
+                            <p id="playlistModalSubtitle" class="text-xs text-outline"></p>
+                        </div>
+                    </div>
+                    <button onclick="closePlaylistModal()" class="p-2 rounded-lg hover:bg-surface-container-highest text-outline hover:text-white transition-colors">
+                        <span class="material-symbols-outlined" data-icon="close">close</span>
+                    </button>
+                </div>
+
+                <!-- Action Controls -->
+                <div class="px-6 py-3 border-b border-outline-variant bg-surface-container-lowest flex items-center justify-between text-xs">
+                    <div class="flex items-center gap-3">
+                        <button onclick="selectAllPlaylistTracks(true)" class="px-3 py-1.5 bg-surface-container-highest rounded hover:text-white font-medium">Select All</button>
+                        <button onclick="selectAllPlaylistTracks(false)" class="px-3 py-1.5 bg-surface-container-highest rounded hover:text-white font-medium">Deselect All</button>
+                        <span id="playlistSelectionCount" class="text-outline font-mono-data">0 selected</span>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <select id="playlistDownloadQuality" class="bg-surface-container-highest border border-outline-variant rounded px-3 py-1.5 text-white font-medium outline-none">
+                            <option value="flac">FLAC (Lossless + Lyrics + Art)</option>
+                            <option value="320k">MP3 (320 kbps Extreme)</option>
+                        </select>
+                        <button onclick="downloadSelectedPlaylistTracks()" id="btnDownloadSelected" class="px-4 py-1.5 bg-primary text-on-primary rounded font-bold hover:brightness-110 flex items-center gap-1.5">
+                            <span class="material-symbols-outlined text-sm" data-icon="download">download</span>
+                            Download Selected
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Tracklist Table -->
+                <div class="flex-1 overflow-y-auto p-4 space-y-1" id="playlistTrackList">
+                    <!-- Dynamic track rows injected here -->
+                </div>
+            </div>
+        </div>
+
+        <!-- METADATA & LYRICS INSPECTION MODAL -->
+        <div id="inspectModal" class="hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+            <div class="bg-surface-container rounded-xl border border-outline-variant max-w-2xl w-full max-h-[85vh] flex flex-col overflow-hidden shadow-2xl">
+                <div class="p-6 border-b border-outline-variant flex items-center justify-between bg-surface-container-low">
+                    <h3 class="text-lg font-bold text-white flex items-center gap-2">
+                        <span class="material-symbols-outlined text-primary" data-icon="info">info</span>
+                        Media & Lyrics Inspector
+                    </h3>
+                    <button onclick="closeInspectModal()" class="p-2 rounded-lg hover:bg-surface-container-highest text-outline hover:text-white transition-colors">
+                        <span class="material-symbols-outlined" data-icon="close">close</span>
+                    </button>
+                </div>
+
+                <div class="p-6 overflow-y-auto space-y-4" id="inspectModalContent">
+                    <!-- Injected via JS -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Loading / Fetching State -->
+        <div id="loadingSection" class="hidden bg-surface-container rounded-lg border border-outline-variant p-10 flex items-center justify-center gap-4">
+            <span class="material-symbols-outlined animate-spin text-primary" data-icon="autorenew">autorenew</span>
+            <span class="text-outline">Fetching video info...</span>
+        </div>
+
+        <!-- Media Analysis Section -->
+        <section id="mainCard" class="hidden bg-surface-container rounded-lg border border-outline-variant overflow-hidden">
+            <!-- Tabs -->
+            <div class="flex border-b border-outline-variant bg-surface-container-low">
+                <button id="modeVideo" onclick="setMode('video')" class="px-8 py-4 font-bold text-xs tracking-widest border-b-2 border-primary text-primary transition-colors">VIDEO</button>
+                <button id="modeAudio" onclick="setMode('audio')" class="px-8 py-4 font-bold text-xs tracking-widest border-b-2 border-transparent text-outline hover:text-on-surface-variant transition-colors">AUDIO</button>
+            </div>
+
+            <div class="p-6">
+                <h2 class="text-xl font-bold mb-6 flex items-start gap-3">
+                    <span class="text-outline text-sm uppercase tracking-widest font-bold mt-1">Title:</span>
+                    <span id="titleText" class="text-white"></span>
+                </h2>
+
+                <div class="grid grid-cols-1 md:grid-cols-12 gap-6">
+                    <!-- Thumbnail -->
+                    <div class="md:col-span-5 aspect-video relative group overflow-hidden rounded-lg border border-outline-variant bg-surface-container-lowest">
+                        <img id="videoThumb" class="w-full h-full object-cover transition-transform duration-700 group-hover:scale-105" src="" alt="Thumbnail"/>
+                    </div>
+
+                    <!-- Selectors & Actions -->
+                    <div class="md:col-span-7 flex flex-col justify-between space-y-4">
+                        
+                        <!-- VIDEO SECTION -->
+                        <div id="videoSection" class="space-y-4">
+                            <div class="space-y-1">
+                                <label class="text-xs font-bold tracking-widest text-outline ml-1">SELECT VIDEO FORMAT</label>
+                                <div class="relative">
+                                    <select id="videoFormatSelect" class="w-full bg-surface-container-lowest border border-outline-variant text-body-base p-4 rounded appearance-none focus:border-primary focus:ring-0 outline-none text-white">
+                                    </select>
+                                    <span class="material-symbols-outlined absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-outline">expand_more</span>
+                                </div>
+                            </div>
+                            <div class="space-y-1">
+                                <label class="text-xs font-bold tracking-widest text-outline ml-1">SELECT AUDIO TRACK</label>
+                                <div class="relative">
+                                    <select id="audioTrackSelect" class="w-full bg-surface-container-lowest border border-outline-variant text-body-base p-4 rounded appearance-none focus:border-primary focus:ring-0 outline-none text-white">
+                                    </select>
+                                    <span class="material-symbols-outlined absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-outline">expand_more</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- AUDIO SECTION -->
+                        <div id="audioSection" class="space-y-4 hidden">
+                            <div class="space-y-1">
+                                <label class="text-xs font-bold tracking-widest text-outline ml-1">SELECT AUDIO FORMAT</label>
+                                <div class="relative">
+                                    <select id="audioExtractFormat" class="w-full bg-surface-container-lowest border border-outline-variant text-body-base p-4 rounded appearance-none focus:border-primary focus:ring-0 outline-none text-white">
+                                        <option value="mp3">MP3</option>
+                                        <option value="m4a">M4A</option>
+                                        <option value="opus">OPUS</option>
+                                        <option value="flac">FLAC</option>
+                                        <option value="wav">WAV</option>
+                                    </select>
+                                    <span class="material-symbols-outlined absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-outline">expand_more</span>
+                                </div>
+                            </div>
+                            <div class="space-y-1" id="audioExtractTrackWrapper" style="display:none;">
+                                <label class="text-xs font-bold tracking-widest text-outline ml-1">SELECT SOURCE TRACK</label>
+                                <div class="relative">
+                                    <select id="audioExtractTrackSelect" class="w-full bg-surface-container-lowest border border-outline-variant text-body-base p-4 rounded appearance-none focus:border-primary focus:ring-0 outline-none text-white">
+                                    </select>
+                                    <span class="material-symbols-outlined absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-outline">expand_more</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Subtitles -->
+                        <div id="subtitleRow" class="hidden flex items-center gap-4 bg-surface-container-lowest p-3 rounded border border-outline-variant">
+                            <label class="flex items-center gap-2 cursor-pointer text-sm">
+                                <input type="checkbox" id="subtitleCheck" class="rounded bg-background border-outline text-primary focus:ring-primary">
+                                <span>Download Subtitles</span>
+                            </label>
+                            <select id="subtitleLang" class="hidden bg-surface-container border border-outline-variant p-2 rounded text-sm w-32"></select>
+                        </div>
+
+                        <div class="flex gap-4 pt-4">
+                            <button id="btnDownload" onclick="startDownload()" class="flex-1 bg-primary text-on-primary py-4 rounded font-bold hover:brightness-110 active:scale-95 transition-all flex items-center justify-center gap-2">
+                                <span class="material-symbols-outlined" data-icon="download">download</span>
+                                Download
+                            </button>
+                            <button id="btnMoreOpts" onclick="toggleMoreOptions()" class="flex-1 bg-surface-container-highest text-on-surface py-4 rounded font-bold hover:brightness-110 active:scale-95 transition-all flex items-center justify-center gap-2">
+                                <span class="material-symbols-outlined" data-icon="settings_suggest">settings_suggest</span>
+                                More options
+                            </button>
+                        </div>
+
+                        <!-- More Options hidden area -->
+                        <div id="moreOptions" class="hidden space-y-3 pt-4 border-t border-outline-variant">
+                            <div class="space-y-1">
+                                <label class="text-xs text-outline">Custom yt-dlp arguments</label>
+                                <input type="text" id="customArgs" class="w-full bg-surface-container-lowest border border-outline-variant rounded p-2 text-sm text-white font-mono-data" placeholder="--sponsorblock-remove all">
+                            </div>
+                            <div class="space-y-1">
+                                <label class="text-xs text-outline">Filename format</label>
+                                <input type="text" id="outputTemplate" class="w-full bg-surface-container-lowest border border-outline-variant rounded p-2 text-sm text-white font-mono-data" value="%(title)s.%(ext)s">
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Progress Section -->
+        <section id="progressSection" class="hidden bg-surface-container rounded-lg border border-outline-variant p-6 text-center space-y-4">
+            <div id="progressStatus" class="text-primary font-medium">Connecting...</div>
+            <div class="w-full bg-surface-container-highest h-2 rounded-full overflow-hidden">
+                <div id="progressBarFill" class="bg-primary h-full w-[0%] transition-all"></div>
+            </div>
+            <div class="flex justify-between text-sm font-mono-data text-outline">
+                <span id="progPercent" class="text-primary font-bold">0%</span>
+                <span id="progSpeed">---</span>
+                <span id="progSize">--- / ---</span>
+                <span id="progEta">ETA: ---</span>
+            </div>
+        </section>
+
+        <!-- Complete Section -->
+        <section id="completeSection" class="hidden bg-surface-container rounded-lg border border-outline-variant p-10 text-center space-y-4">
+            <span class="material-symbols-outlined text-6xl text-primary block" data-icon="check_circle">check_circle</span>
+            <h3 id="completeTitle" class="text-xl font-bold text-primary">Download Complete!</h3>
+            <div id="completeDetail" class="text-sm text-outline font-mono-data"></div>
+            <button onclick="resetUI()" class="bg-primary text-on-primary px-6 py-2 rounded font-bold hover:brightness-110">Download Another</button>
+        </section>
+
+        <!-- Footer: Recent Downloads -->
+        <section class="space-y-4 pt-6">
+            <div class="flex justify-between items-end border-b border-outline-variant pb-2">
+                <h3 class="font-bold text-xl">Recent Downloads</h3>
+                <span id="historyCount" class="text-outline text-sm"></span>
+            </div>
+            <div id="historyList" class="space-y-2">
+                <!-- Injected via JS -->
+                <div class="text-center py-10 text-outline text-sm">No downloads yet. Paste a URL above to get started!</div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- Toast -->
+    <div id="toast" class="toast"></div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

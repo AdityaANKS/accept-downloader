@@ -1,4 +1,4 @@
-"""
+r"""
 Platform Detection and Handling for Personal Media Downloader
 Location: C:\downloader\platforms.py
 """
@@ -30,6 +30,12 @@ class Platform(Enum):
     PINTEREST = "Pinterest"
     LINKEDIN = "LinkedIn"
     TUMBLR = "Tumblr"
+    GITHUB = "GitHub"
+    SPOTIFY = "Spotify"
+    APPLE_MUSIC = "Apple Music"
+    DEEZER = "Deezer"
+    TIDAL = "Tidal"
+    CRUNCHYROLL = "Crunchyroll"
     UNKNOWN = "Unknown"
     
     @property
@@ -50,6 +56,12 @@ class Platform(Enum):
             Platform.TWITCH: "#9146FF",
             Platform.SOUNDCLOUD: "#FF5500",
             Platform.DAILYMOTION: "#0066DC",
+            Platform.GITHUB: "#181717",
+            Platform.SPOTIFY: "#1DB954",
+            Platform.APPLE_MUSIC: "#FA243C",
+            Platform.DEEZER: "#A238FF",
+            Platform.TIDAL: "#000000",
+            Platform.CRUNCHYROLL: "#F47521",
         }
         return colors.get(self, "#808080")
 
@@ -197,6 +209,17 @@ PLATFORM_INFO: Dict[Platform, PlatformInfo] = {
         supports_subtitles=True,
         max_resolution="4K",
     ),
+    Platform.CRUNCHYROLL: PlatformInfo(
+        platform=Platform.CRUNCHYROLL,
+        name="Crunchyroll",
+        domains=["crunchyroll.com"],
+        supports_video=True,
+        supports_audio=True,
+        supports_playlist=True,
+        supports_subtitles=True,
+        max_resolution="1080p",
+        requires_auth=True,
+    ),
 }
 
 
@@ -273,6 +296,31 @@ PLATFORM_PATTERNS: Dict[Platform, List[str]] = {
         r"(?:https?://)?dai\.ly/[\w-]+",
         r"(?:https?://)?(?:www\.)?dailymotion\.com/playlist/[\w-]+",
     ],
+    Platform.GITHUB: [
+        r"(?:https?://)?(?:www\.)?github\.com/[\w.-]+/[\w.-]+/releases",
+        r"(?:https?://)?(?:www\.)?github\.com/[\w.-]+/[\w.-]+/releases/tag/[\w.-]+",
+        r"(?:https?://)?(?:www\.)?github\.com/[\w.-]+/[\w.-]+/releases/download/.+",
+        r"(?:https?://)?(?:www\.)?github\.com/[\w.-]+/[\w.-]+/archive/.+",
+    ],
+    Platform.SPOTIFY: [
+        r"(?:https?://)?open\.spotify\.com/(track|album|playlist|artist)/[\w]+",
+        r"(?:https?://)?spotify\.link/[\w]+",
+        r"spotify:(track|album|playlist|artist):[\w]+",
+    ],
+    Platform.APPLE_MUSIC: [
+        r"(?:https?://)?music\.apple\.com/[\w-]+/(album|playlist|song)/[\w.-]+(?:/\d+)?",
+    ],
+    Platform.DEEZER: [
+        r"(?:https?://)?(?:www\.)?deezer\.com/(?:\w+/)?(track|album|playlist|artist)/[\d]+",
+        r"(?:https?://)?deezer\.page\.link/[\w]+",
+    ],
+    Platform.TIDAL: [
+        r"(?:https?://)?(?:listen\.)?tidal\.com/(browse/)?(track|album|playlist|artist)/[\w-]+",
+    ],
+    Platform.CRUNCHYROLL: [
+        r"(?:https?://)?(?:www\.)?crunchyroll\.com/(?:[a-z]{2}(?:-[a-z]{2})?/)?(?:watch|series)/[\w-]+",
+        r"(?:https?://)?(?:www\.)?crunchyroll\.com/.*",
+    ],
 }
 
 
@@ -285,17 +333,52 @@ class ContentType(Enum):
     VIDEO = "video"
     AUDIO = "audio"
     PLAYLIST = "playlist"
+    TRACK = "track"
+    ALBUM = "album"
+    ARTIST = "artist"
     CHANNEL = "channel"
     PROFILE = "profile"
     STORY = "story"
     SHORT = "short"
     LIVE = "live"
+    M3U8 = "m3u8"
+    DASH = "dash"
+    DIRECT_FILE = "direct_file"
+    GITHUB_RELEASE = "github_release"
     UNKNOWN = "unknown"
 
 
 def detect_content_type(url: str, platform: Platform = None) -> ContentType:
     """Detect content type from URL"""
     url_lower = url.lower()
+    
+    # Spotify specific
+    if platform == Platform.SPOTIFY or "spotify.com" in url_lower or "spotify:" in url_lower:
+        if "/playlist/" in url_lower or ":playlist:" in url_lower:
+            return ContentType.PLAYLIST
+        if "/album/" in url_lower or ":album:" in url_lower:
+            return ContentType.ALBUM
+        if "/artist/" in url_lower or ":artist:" in url_lower:
+            return ContentType.ARTIST
+        return ContentType.TRACK
+    
+    # Apple Music specific
+    if platform == Platform.APPLE_MUSIC or "music.apple.com" in url_lower:
+        if "/playlist/" in url_lower:
+            return ContentType.PLAYLIST
+        if "/album/" in url_lower:
+            return ContentType.ALBUM
+        return ContentType.TRACK
+    
+    # Deezer specific
+    if platform == Platform.DEEZER or "deezer.com" in url_lower:
+        if "/playlist/" in url_lower:
+            return ContentType.PLAYLIST
+        if "/album/" in url_lower:
+            return ContentType.ALBUM
+        if "/artist/" in url_lower:
+            return ContentType.ARTIST
+        return ContentType.TRACK
     
     # YouTube specific
     if platform == Platform.YOUTUBE or "youtube" in url_lower or "youtu.be" in url_lower:
@@ -344,9 +427,27 @@ def detect_content_type(url: str, platform: Platform = None) -> ContentType:
             return ContentType.PLAYLIST
         return ContentType.AUDIO
     
+    # Crunchyroll specific
+    if platform == Platform.CRUNCHYROLL or "crunchyroll.com" in url_lower:
+        if "/series/" in url_lower:
+            return ContentType.PLAYLIST
+        return ContentType.VIDEO
+    
     # General playlist detection
     if "playlist" in url_lower or "/sets/" in url_lower:
         return ContentType.PLAYLIST
+    
+    # M3U8 / HLS streams
+    if url_lower.endswith('.m3u8') or url_lower.endswith('.m3u') or '/hls/' in url_lower:
+        return ContentType.M3U8
+    
+    # MPEG-DASH
+    if url_lower.endswith('.mpd'):
+        return ContentType.DASH
+    
+    # GitHub releases
+    if 'github.com' in url_lower and '/releases' in url_lower:
+        return ContentType.GITHUB_RELEASE
     
     return ContentType.VIDEO
 
@@ -613,64 +714,16 @@ def normalize_url(url: str) -> str:
     return url.rstrip('/')
 
 
-# ============================================================================
-# PLATFORM CAPABILITIES
-# ============================================================================
-
-def supports_quality(platform: Platform, resolution: str) -> bool:
-    """Check if platform supports given resolution"""
-    info = get_platform_info(platform)
-    if not info:
+def is_crunchyroll_url(url: str) -> bool:
+    """Check if URL is a Crunchyroll anime URL"""
+    if not url:
         return False
-    
-    # Parse max resolution
-    max_res = info.max_resolution.upper()
-    resolution = resolution.upper()
-    
-    res_order = ['144P', '240P', '360P', '480P', '720P', '1080P', '1440P', '2K', '4K', '8K']
-    
-    try:
-        max_idx = next(i for i, r in enumerate(res_order) if r in max_res)
-        res_idx = next(i for i, r in enumerate(res_order) if r in resolution)
-        return res_idx <= max_idx
-    except StopIteration:
-        return True  # Unknown resolution, assume supported
+    return "crunchyroll.com" in url.lower()
 
-
-def requires_authentication(platform: Platform) -> bool:
-    """Check if platform requires authentication for some content"""
-    info = get_platform_info(platform)
-    return info.requires_auth if info else False
-
-
-def supports_feature(platform: Platform, feature: str) -> bool:
-    """Check if platform supports a feature"""
-    info = get_platform_info(platform)
-    if not info:
-        return False
-    
-    return info.capabilities.get(feature, False)
-
-
-# ============================================================================
-# CONVENIENCE FUNCTIONS
-# ============================================================================
 
 def get_all_platforms() -> List[Platform]:
     """Get list of all supported platforms"""
     return [p for p in Platform if p != Platform.UNKNOWN]
-
-
-def get_platform_domains(platform: Platform) -> List[str]:
-    """Get list of domains for a platform"""
-    info = get_platform_info(platform)
-    return info.domains if info else []
-
-
-def get_supported_platforms_text() -> str:
-    """Get formatted text of supported platforms"""
-    platforms = get_all_platforms()
-    return ", ".join(p.display_name for p in platforms)
 
 
 # ============================================================================
@@ -714,13 +767,4 @@ if __name__ == "__main__":
         print(f"    Is Playlist: {is_playlist}")
     
     print("\n" + "=" * 50)
-    print("\nSupported Platforms:")
-    print("-" * 50)
-    for platform in get_all_platforms():
-        info = get_platform_info(platform)
-        if info:
-            caps = [k for k, v in info.capabilities.items() if v]
-            print(f"  {platform.display_name}: {', '.join(caps)}")
-    
-    print("\n" + "=" * 50)
-    print("Tests complete!")
+    print("Tests complete!")
