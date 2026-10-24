@@ -5,7 +5,9 @@ import shutil
 import subprocess
 import time
 import logging
-from typing import Optional, List, Tuple, Union
+import socket
+import threading
+from typing import Optional, List, Tuple, Union, Callable
 from urllib.parse import urlparse
 
 # ============================================================================
@@ -340,6 +342,161 @@ class ProgressTracker:
         return f"{bar} | {speed_str} | ETA: {eta_str}"
 
 
+# ============================================================================
+# NETWORK RESILIENCE & DISCONNECT WATCHDOG
+# ============================================================================
+
+def is_internet_available(
+    hosts: Tuple[Tuple[str, int], ...] = (
+        ("1.1.1.1", 53),
+        ("8.8.8.8", 53),
+        ("1.0.0.1", 53),
+        ("8.8.4.4", 53),
+    ),
+    timeout: float = 1.5,
+) -> bool:
+    """
+    Fast socket-level probe to check internet connectivity.
+    Probes public Anycast DNS servers (Cloudflare / Google) on port 53 directly by IP,
+    bypassing OS DNS resolution so it won't hang when local DNS is dead.
+    """
+    for host, port in hosts:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(timeout)
+            s.connect((host, port))
+            s.close()
+            return True
+        except (socket.timeout, OSError):
+            continue
+    return False
+
+
+def is_network_error(exc: Optional[BaseException]) -> bool:
+    """
+    Determine if an exception is caused by an internet cut, socket timeout,
+    connection reset, DNS lookup failure, or CDN reachability drop.
+    """
+    if exc is None:
+        return False
+
+    from urllib.error import URLError
+    network_exc_types = (
+        ConnectionError, ConnectionResetError, ConnectionAbortedError, ConnectionRefusedError,
+        TimeoutError, socket.timeout, socket.gaierror, socket.herror, URLError
+    )
+    if isinstance(exc, network_exc_types):
+        return True
+
+    err_str = str(exc).lower()
+    net_keywords = (
+        "connection", "network", "offline", "socket", "timeout", "timed out",
+        "name resolution", "getaddrinfo", "econnreset", "econnrefused", "enotfound",
+        "winerror 10054", "winerror 10053", "winerror 10060", "winerror 10061", "winerror 10065",
+        "temporary failure in name resolution", "nodename nor servname provided",
+        "remote end closed connection", "curl: (28)", "curl: (7)", "curl: (6)",
+        "curl: (55)", "curl: (56)", "tls connect error", "broken pipe",
+        "max retries exceeded", "failed to establish a new connection",
+        "read timed out", "connection reset", "network is unreachable",
+        "host is unreachable", "unable to connect", "service unavailable",
+    )
+    return any(kw in err_str for kw in net_keywords)
+
+
+def safe_print(text: str, end: str = "\n", flush: bool = True):
+    """Safely print text handling Windows cp1252 / legacy console encoding."""
+    try:
+        print(text, end=end, flush=flush)
+    except (UnicodeEncodeError, OSError):
+        try:
+            encoding = getattr(sys.stdout, 'encoding', None) or 'ascii'
+            clean_text = text.encode(encoding, errors='replace').decode(encoding, errors='replace')
+            print(clean_text, end=end, flush=flush)
+        except Exception:
+            pass
+
+
+def wait_for_internet_connection(
+    status_callback: Optional[Callable[[str], None]] = None,
+    check_interval: float = 2.5,
+    stop_event: Optional[threading.Event] = None,
+    max_wait_seconds: Optional[int] = None,
+    task_name: str = "",
+) -> bool:
+    """
+    Monitors internet connectivity. If disconnected, pauses execution,
+    periodically notifies the user/UI, and blocks until connection is restored.
+    
+    Returns:
+        True if connection is online/restored, False if cancelled or max_wait expired.
+    """
+    if is_internet_available():
+        return True
+
+    task_desc = f" ({task_name})" if task_name else ""
+    offline_msg = f"[⚠️ OFFLINE] Internet connection lost! Download paused{task_desc}. Waiting to reconnect..."
+
+    logger = get_logger()
+    logger.warning(offline_msg)
+
+    if status_callback:
+        try:
+            status_callback(offline_msg)
+        except Exception:
+            pass
+    else:
+        safe_print(f"\n  \033[93m{offline_msg}\033[0m", flush=True)
+
+    start_wait = time.time()
+    spinner = ["|", "/", "-", "\\"]
+    idx = 0
+
+    while True:
+        if stop_event and stop_event.is_set():
+            logger.info("Download cancelled by user while waiting for internet reconnection.")
+            return False
+
+        if max_wait_seconds and (time.time() - start_wait) > max_wait_seconds:
+            logger.error(f"Internet connection did not recover within {max_wait_seconds}s limit.")
+            return False
+
+        # Sleep in small increments for prompt cancellation responsiveness
+        for _ in range(int(check_interval * 10)):
+            if stop_event and stop_event.is_set():
+                return False
+            time.sleep(0.1)
+
+        idx += 1
+        elapsed = int(time.time() - start_wait)
+        spin = spinner[idx % len(spinner)]
+
+        if is_internet_available():
+            break
+
+        # Periodic status ping
+        waiting_status = f"\r  \033[93m[⚠️ OFFLINE]\033[0m Waiting for internet connection... {spin} ({elapsed}s elapsed)"
+        if status_callback:
+            try:
+                status_callback(waiting_status)
+            except Exception:
+                pass
+        else:
+            safe_print(waiting_status, end="", flush=True)
+
+    online_msg = f"\n  \033[92m[🌐 ONLINE] Internet connection restored! Resuming download{task_desc}...\033[0m\n"
+    logger.info(f"Internet restored after {int(time.time() - start_wait)}s. Resuming download.")
+
+    if status_callback:
+        try:
+            status_callback(online_msg)
+        except Exception:
+            pass
+    else:
+        safe_print(online_msg, flush=True)
+
+    return True
+
+
 if __name__ == "__main__":
     print("Utils Module - Testing")
     print("=" * 50)
@@ -347,4 +504,4 @@ if __name__ == "__main__":
     print("Format size:", format_size(1073741824))
     print("Format duration:", format_duration(3665))
     print("FFmpeg available:", check_ffmpeg())
-    print("Done!")
+    print("Done!")

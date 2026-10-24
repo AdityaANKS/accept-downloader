@@ -1,0 +1,28 @@
+{
+  "test-streams.mux.dev": {
+    "domain": "test-streams.mux.dev",
+    "last_seen": 1792849150,
+    "stream_type": "hls",
+    "headers": {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+      "Referer": "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
+    },
+    "is_trailer": false
+  },
+  "ani.pm": {
+    "domain": "ani.pm",
+    "last_seen": 1792846826,
+    "stream_type": "hls",
+    "headers": {
+      "sec-ch-ua-platform": "\"Windows\"",
+      "referer": "",
+      "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+      "sec-ch-ua": "\"Google Chrome\";v=\"143\", \"Chromium\";v=\"143\", \"Not A(Brand\";v=\"24\"",
+      "accept-language": "en-US",
+      "sec-ch-ua-mobile": "?0",
+      "Referer": "https://embed.settlar.io/embed/v1?t=2.TOrbrcgD1HXtjoOp_xibCXmDXTUhOhs-QDRAsl2r7gl1S6MmZK-7Q44Q5bzp9-PHP9X1x8k6zljcibhzhQ6_UlF4fqHVc5jjW1aT3SMHUHfXopzvNRTLzMGJP0xWpQY_qljvAoKsZ65nZGadzZqczX3ns2VRtKR3_k_dXCVz0K7kXyi_dcevLXqoJ4iKZMTaMGxMTHfCCCKjCVNBThapgtJiPRBJ2-o8rZc7ovUECmlcxJ3Ab0CHTXqTDuSY7uz8IQmyy4Q0LZTWg5EmXOpH7ipRtGSQ442fs2nUVVvwLnE7IauLoNMibQ#hl=en-US",
+      "Origin": "https://embed.settlar.io"
+    },
+    "is_trailer": false
+  }
+}

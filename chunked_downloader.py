@@ -38,7 +38,7 @@ except ImportError:
 from config import Config as _Cfg
 _DEFAULT_FILES_DIR = _Cfg.FILES_DIR
 
-from utils import format_size, format_duration, sanitize_filename, get_logger
+from utils import format_size, format_duration, sanitize_filename, get_logger, is_internet_available, is_network_error, wait_for_internet_connection
 
 logger = get_logger()
 
@@ -882,6 +882,18 @@ class ChunkedDownloader:
                     try:
                         f.result()
                     except Exception as e:
+                        if is_network_error(e) or not is_internet_available():
+                            task.save_state()
+                            logger.warning(f"Network error on chunk {chunk.index} ({e}). Pausing until connection restores...")
+                            wait_for_internet_connection(
+                                task_name=f"Chunk {chunk.index} ({task.filename})",
+                                stop_event=self._stop_event
+                            )
+                            chunk.status = 'downloading'
+                            new_future = pool.submit(self._download_chunk, task, chunk)
+                            futures[new_future] = chunk
+                            continue
+
                         if chunk.retries < self.MAX_RETRIES:
                             chunk.retries += 1
                             chunk.status = 'pending'

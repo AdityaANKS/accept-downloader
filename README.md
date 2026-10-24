@@ -10,8 +10,12 @@ Built on top of [yt-dlp](https://github.com/yt-dlp/yt-dlp), with native integrat
 
 ### 🌐 Universal Webpage Media & Stream Sniffer (Option 24 / Web Sniffer Tab)
 - **Effortless "Paste Any URL & Download"** — downloads video, audio, and subtitle tracks from **any webpage URL**, including complex sites with embedded or iframe players.
-- **Headless Playwright Discovery** — automatically inspects DOM trees, traverses nested `<iframe>` players, dismisses intrusive popups, and triggers HTML5, Video.js, JWPlayer, Plyr, Artplayer, and DPlayer instances.
-- **In-Browser WebCrypto Segment Unscrambler** — intercepts in-browser cryptographic keystreams (e.g. AES-CTR) and decrypts protected HLS streaming segments on-the-fly (tested on complex anime and streaming portals).
+- **⚡ Fast Site Recipe & API Synthesizer (Reverse-Engineered)** — incorporates principles from `reverse-engineer-anything` and `api-anything`. Known platforms (e.g. Movy.sx, Vidy.st, Ani.pm) bypass the 15-second Playwright headless browser startup and resolve streams via direct API queries in < 500ms.
+- **Client-Side Stream Cipher Decryption** — pure-Python implementation of reverse-engineered Murmur-style bit mixers and XOR PRNG keystream decoders (e.g. WeCollege/Miami sources).
+- **Trailer Detection & Deprioritization** — automatically identifies and separates movie trailers/previews from the real feature film or TV episode, ensuring the main stream is always Candidate [0].
+- **Headless Playwright Discovery & Self-Healing** — for un-cached or novel sites, automatically inspects DOM trees, traverses nested `<iframe>` players, dismisses intrusive popups, and triggers HTML5/JWPlayer/Video.js instances. Automatically compiles and caches new API patterns in `site_recipes.json`.
+- **Bulletproof 403 CDN Bypass** — automatically passes sniffed `Referer`, `Origin`, and `User-Agent` headers to CDN fragment downloads, with automatic retry switching between Chrome TLS impersonation, native HTTP, and direct multithreaded fragment downloading.
+- **In-Browser WebCrypto Segment Unscrambler** — intercepts in-browser cryptographic keystreams (e.g. AES-CTR) and decrypts protected HLS streaming segments on-the-fly.
 - **Master Manifest & Track Interception** — intercepts Master HLS (`.m3u8`), DASH (`.mpd`), direct streams (`.mp4`), and external subtitle tracks (`.vtt`, `.srt`).
 - **Clean Ephemeral Netscape Cookie Jar** — generates domain-scoped cookie files directly from browser sessions, completely eliminating cookie header security warnings and CDN leakage.
 - **Smooth Non-Jitter Progress Bar** — fixed-width, flicker-free terminal progress bar with accurate byte counters, live transfer speeds, and ETA.
@@ -46,7 +50,8 @@ Built on top of [yt-dlp](https://github.com/yt-dlp/yt-dlp), with native integrat
   - **Search Explorer**: Live search for music and videos with card previews and tracklist inspection.
   - **Universal Sniffer**: Live webpage sniffer with stream candidate cards, resolution badges, audio selectors, and real-time SSE progress streaming.
 
-### ⚡ Smart Productivity Features
+### ⚡ Smart Productivity & Network Resilience Features
+- **Universal Network Resilience & Auto-Pause/Resume** — socket-level connectivity watchdog automatically detects network drops, enters an auto-paused state (`[⚠️ OFFLINE]`), and continuously probes connection health. The instant connectivity returns (`[🌐 ONLINE]`), downloads seamlessly resume from the exact byte or segment without losing progress or restarting from 0.
 - **Clipboard Auto-Paste** — automatically detects valid URLs on your clipboard when opening the menu.
 - **Smart URL Auto-Detection**:
   - Spotify URLs → automatically routes to the **SpotiFLAC** engine.

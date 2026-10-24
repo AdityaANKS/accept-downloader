@@ -22,7 +22,7 @@ import requests
 import yt_dlp
 
 from config import Config
-from utils import sanitize_filename, format_size, format_duration, get_logger, check_ffmpeg
+from utils import sanitize_filename, format_size, format_duration, get_logger, check_ffmpeg, is_internet_available, is_network_error, wait_for_internet_connection
 
 logger = get_logger()
 
@@ -620,6 +620,9 @@ class SpotiFLACDownloader:
             'quiet': True,
             'no_warnings': True,
             'noplaylist': True,
+            'retries': 20,
+            'fragment_retries': 50,
+            'continuedl': True,
             'remote_components': ['ejs:github'],
             'extractor_args': {'youtube': {'player_client': ['mweb', 'web']}},
         }
@@ -627,16 +630,33 @@ class SpotiFLACDownloader:
             ydl_opts['js_runtimes'] = js_runtimes
 
         try:
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(search_query, download=True)
-                    if not info or not info.get('entries'):
-                        search_query2 = f"ytsearch1:{track.artist_str} - {track.title}"
-                        info = ydl.extract_info(search_query2, download=True)
-            except Exception:
-                search_query2 = f"ytsearch1:{track.artist_str} - {track.title}"
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(search_query2, download=True)
+            while True:
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(search_query, download=True)
+                        if not info or not info.get('entries'):
+                            search_query2 = f"ytsearch1:{track.artist_str} - {track.title}"
+                            info = ydl.extract_info(search_query2, download=True)
+                    break
+                except Exception as e_track:
+                    if is_network_error(e_track) or not is_internet_available():
+                        if progress_callback:
+                            progress_callback({
+                                "status": "paused_offline",
+                                "message": "⚠️ Internet lost! SpotiFLAC download paused... Waiting for connection.",
+                            })
+                        wait_for_internet_connection(task_name=f"{track.artist_str} - {track.title}")
+                        continue
+                    search_query2 = f"ytsearch1:{track.artist_str} - {track.title}"
+                    try:
+                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                            info = ydl.extract_info(search_query2, download=True)
+                        break
+                    except Exception as e2:
+                        if is_network_error(e2) or not is_internet_available():
+                            wait_for_internet_connection(task_name=f"{track.artist_str} - {track.title}")
+                            continue
+                        break
 
             # Find the downloaded temp audio file
             downloaded_files = [os.path.join(temp_dir, f) for f in os.listdir(temp_dir) if os.path.isfile(os.path.join(temp_dir, f))]

@@ -39,7 +39,7 @@ try:
 except Exception:
     db = None
 
-from utils import format_size, check_ffmpeg, format_duration
+from utils import format_size, check_ffmpeg, format_duration, is_internet_available, is_network_error, wait_for_internet_connection
 
 try:
     from spotiflac import SpotiFLACDownloader, SpotifyMetadataResolver, SpotifyTrack, SpotifyCollection
@@ -447,9 +447,10 @@ def do_download(url: str, options: dict, progress_callback=None) -> dict:
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
-        'retries': 3,
+        'retries': 20,
+        'fragment_retries': 50,
+        'continuedl': True,
         'socket_timeout': 15,
-        'fragment_retries': 3,
         'overwrites': False,
         'windowsfilenames': True,
         'geo_bypass': True,
@@ -528,6 +529,18 @@ def do_download(url: str, options: dict, progress_callback=None) -> dict:
                     downloaded_ok = True
                     break
         except Exception as e:
+            if is_network_error(e) or not is_internet_available():
+                if progress_callback:
+                    progress_callback({'type': 'status', 'message': '⚠️ Internet connection lost! Download paused... Waiting to reconnect.'})
+                wait_for_internet_connection(status_callback=lambda msg: progress_callback({'type': 'status', 'message': msg}) if progress_callback else None)
+                try:
+                    with yt_dlp.YoutubeDL(dl_opts) as ydl:
+                        ydl.download([url])
+                        downloaded_ok = True
+                        break
+                except Exception as e_net:
+                    if is_network_error(e_net) or not is_internet_available():
+                        continue
             err_str = str(e).lower()
             if 'requested format' in err_str or 'no video' in err_str:
                 # Fallback format

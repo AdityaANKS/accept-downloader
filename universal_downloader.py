@@ -49,9 +49,10 @@ import yt_dlp
 from config import Config
 from utils import (
     get_logger, sanitize_filename, format_size, format_duration,
-    check_ffmpeg
+    check_ffmpeg, is_internet_available, is_network_error, wait_for_internet_connection
 )
 from database import DatabaseManager
+from site_recipes import SiteRecipeEngine
 
 logger = get_logger()
 
@@ -120,6 +121,7 @@ class VideoTrackOption:
 class AudioTrackOption:
     format_id: str
     language: str = "und"
+    name: str = ""
     acodec: str = ""
     abr: Optional[float] = None
     channels: Optional[int] = 2
@@ -127,8 +129,12 @@ class AudioTrackOption:
     @property
     def display_label(self) -> str:
         parts = []
-        lang_str = self.language.upper() if self.language and self.language != "und" else "Default Audio"
-        parts.append(lang_str)
+        if self.name and self.name.lower() != self.language.lower():
+            parts.append(f"{self.name} [{self.language.upper()}]")
+        elif self.language and self.language != "und":
+            parts.append(self.language.upper())
+        else:
+            parts.append("Default Audio")
         if self.acodec and self.acodec != "none":
             clean_codec = self.acodec.split(".")[0]
             parts.append(f"[{clean_codec}]")
@@ -169,6 +175,7 @@ class StreamCandidate:
     page_url: str = ""
     is_drm: bool = False
     drm_notice: str = ""
+    is_trailer: bool = False
     duration_s: float = 0.0
     thumbnail: str = ""
     video_tracks: List[VideoTrackOption] = field(default_factory=list)
@@ -349,10 +356,13 @@ def parse_hls_manifest_tracks(
                 akey = (m_lang, m_name)
                 if akey not in seen_a:
                     seen_a.add(akey)
+                    group_m = re.search(r'GROUP-ID="([^"]+)"', line)
+                    fid = f"{group_m.group(1)}-{m_name}" if (group_m and m_name) else f"audio-{m_lang}"
                     audio_tracks.append(
                         AudioTrackOption(
-                            format_id=f"audio-{m_lang}",
+                            format_id=fid,
                             language=m_lang,
+                            name=m_name,
                             acodec="aac",
                         )
                     )
@@ -696,6 +706,20 @@ class WebpageStreamSniffer:
 
             # Click common video player play buttons across main page and all nested iframes
             selectors = [
+                "button:has-text('Play')",
+                "button:has-text('Watch')",
+                "button:has-text('Watch Movie')",
+                "button:has-text('Watch Now')",
+                "button:has-text('Play Now')",
+                "a:has-text('Play')",
+                "a:has-text('Watch')",
+                "a:has-text('Watch Movie')",
+                "a:has-text('Watch Now')",
+                ".mv-btn--primary",
+                "[class*='btn']:has-text('Play')",
+                "[class*='btn']:has-text('Watch')",
+                "[class*='primary']:has-text('Play')",
+                "[class*='primary']:has-text('Watch')",
                 "button[aria-label*='Play' i]",
                 "button[title*='Play' i]",
                 "button[aria-label*='reproduce' i]",
@@ -714,7 +738,8 @@ class WebpageStreamSniffer:
                 "[class*='play-icon' i]",
                 "[id*='player' i] button",
                 "[class*='player' i] button",
-                "button",
+                "[id*='play' i]",
+                "[class*='play' i]",
                 "video",
                 ".fp-ui",
                 ".mejs__overlay-play",
@@ -812,6 +837,28 @@ class WebpageStreamSniffer:
             if progress_cb:
                 progress_cb("Capturing streaming manifest & subtitle network traffic...")
             await asyncio.sleep(5.0)
+
+            # Check if movy.sx or vidy embed can be augmented directly
+            m_movy = re.search(r"movy\.sx/(movie|tv|anime)/([0-9a-zA-Z/]+)", page_url)
+            has_hls_stream = any(".m3u8" in u or ".mpd" in u for u in self.captured_streams)
+            if m_movy and not has_hls_stream:
+                route_type = m_movy.group(1)
+                sub_path = m_movy.group(2).split("?")[0]
+                vidy_url = f"https://vidy.st/{route_type}/{sub_path}?autoplay=true"
+                if progress_cb:
+                    progress_cb("Connecting to direct Vidy stream engine...")
+                try:
+                    await page.goto(vidy_url, wait_until="domcontentloaded", timeout=12000)
+                    for sel in ["button:has-text('Play')", "button:has-text('Watch')", ".mv-btn--primary"]:
+                        try:
+                            loc = page.locator(sel).first
+                            if await loc.is_visible(timeout=300):
+                                await loc.click(force=True, timeout=300)
+                        except Exception:
+                            pass
+                    await asyncio.sleep(4.0)
+                except Exception as e:
+                    logger.debug(f"Direct Vidy fallback navigation error: {e}")
 
             # Harvest in-browser decrypted manifests and cryptographic keys across all frames
             for frame in page.frames:
@@ -975,6 +1022,7 @@ class UniversalMediaDownloader:
             self.output_dir = getattr(Config, "UNKNOWN_DIR", os.path.join(Config.BASE_DIR, "unknown"))
         os.makedirs(self.output_dir, exist_ok=True)
         self.sniffer = WebpageStreamSniffer()
+        self.recipe_engine = SiteRecipeEngine()
         self.db = DatabaseManager()
 
     @staticmethod
@@ -1015,6 +1063,14 @@ class UniversalMediaDownloader:
         Analyze any webpage or stream URL, discover all available media streams,
         parse their manifest qualities, audio tracks, and subtitles.
         """
+        # 1. Fast Site Recipe API synthesis (< 500ms)
+        try:
+            fast_candidates = self.recipe_engine.extract(url, progress_cb=progress_cb)
+            if fast_candidates:
+                return fast_candidates
+        except Exception as e:
+            logger.warning(f"Fast recipe extraction notice: {e}")
+
         streams, subtitles = self.sniffer.discover_streams(url, timeout_s=timeout_s, progress_cb=progress_cb)
 
         candidates: List[StreamCandidate] = []
@@ -1050,16 +1106,25 @@ class UniversalMediaDownloader:
         if has_playable:
             candidates = [c for c in candidates if len(c.video_tracks) > 0 or len(c.audio_tracks) > 0]
 
-        # Sort so master stream with most video resolutions is at index 0
+        # Sort so full master/main media stream is at index 0, and trailers are deprioritized
         candidates.sort(
             key=lambda c: (
+                0 if c.is_trailer else 1,
                 1 if not c.is_drm else 0,
+                1 if c.type in ("hls", "dash") else 0,
                 len(c.video_tracks),
                 max(c.unique_resolutions) if c.unique_resolutions else 0,
+                c.duration_s,
                 len(c.subtitles),
             ),
             reverse=True
         )
+
+        if candidates:
+            try:
+                self.recipe_engine.learn(url, candidates[0])
+            except Exception:
+                pass
 
         return candidates
 
@@ -1272,6 +1337,39 @@ class UniversalMediaDownloader:
         if not video_tracks and parsed_v:
             video_tracks = parsed_v
 
+        # Single-rendition media playlist fallback (e.g. index-s1080p-v1-a1.m3u8 where height is None)
+        if not video_tracks:
+            for f in formats:
+                if f.get("vcodec") != "none":
+                    fid = str(f.get("format_id") or "0")
+                    m_h = re.search(r"(\d{3,4})p", stream_url)
+                    h = int(m_h.group(1)) if m_h else (f.get("height") or 0)
+                    res_label = f"{h}p" if h > 0 else (f.get("resolution") or "Original")
+                    video_tracks.append(
+                        VideoTrackOption(
+                            format_id=fid,
+                            resolution=res_label,
+                            height=h,
+                            vcodec=f.get("vcodec") or "auto",
+                            tbr=f.get("tbr") or f.get("vbr"),
+                            filesize_approx=f.get("filesize") or f.get("filesize_approx") or 0,
+                        )
+                    )
+                    break
+
+            if not video_tracks and (stype in ("hls", "dash") or stype == "direct"):
+                m_h = re.search(r"(\d{3,4})p", stream_url)
+                h = int(m_h.group(1)) if m_h else 0
+                res_label = f"{h}p" if h > 0 else "Original"
+                video_tracks.append(
+                    VideoTrackOption(
+                        format_id="best",
+                        resolution=res_label,
+                        height=h,
+                        vcodec="auto",
+                    )
+                )
+
         # Sort video tracks by height descending
         video_tracks.sort(key=lambda vt: (vt.height, vt.fps or 0), reverse=True)
 
@@ -1281,14 +1379,16 @@ class UniversalMediaDownloader:
         for f in formats:
             if f.get("vcodec") == "none" and f.get("acodec") != "none":
                 fid = str(f.get("format_id", ""))
-                lang = f.get("language") or f.get("format_note") or "und"
-                akey = (lang, f.get("acodec"), f.get("abr"))
+                lang = f.get("language") or "und"
+                name = f.get("format_note") or ""
+                akey = (lang, name, f.get("acodec"), f.get("abr"))
                 if akey not in seen_a_keys:
                     seen_a_keys.add(akey)
                     audio_tracks.append(
                         AudioTrackOption(
                             format_id=fid,
                             language=lang,
+                            name=name,
                             acodec=f.get("acodec") or "",
                             abr=f.get("abr") or f.get("tbr"),
                             channels=f.get("audio_channels") or 2,
@@ -1297,41 +1397,57 @@ class UniversalMediaDownloader:
 
         if not audio_tracks and parsed_a:
             audio_tracks = parsed_a
+        elif audio_tracks and parsed_a:
+            # Enrich audio tracks with any names from parsed manifest
+            for at in audio_tracks:
+                match_p = next((pa for pa in parsed_a if pa.language == at.language or pa.format_id == at.format_id), None)
+                if match_p and match_p.name and not at.name:
+                    at.name = match_p.name
 
-        # Subtitles (Embedded + Captured External)
+        # Subtitles (Manifest Parsed + Embedded yt-dlp + Captured External)
         subtitles: List[SubtitleTrackOption] = []
         seen_subs = set()
 
-        # 1. Embedded subtitles in manifest
+        # 1. Manifest parsed subtitles (retain true names like 'English CC (Dub)')
+        if parsed_s:
+            for pst in parsed_s:
+                skey = (pst.language.lower(), (pst.name or "").lower(), pst.url)
+                if skey not in seen_subs:
+                    seen_subs.add(skey)
+                    if not pst.headers and headers:
+                        pst.headers = headers
+                    subtitles.append(pst)
+
+        # 2. Embedded subtitles in yt-dlp info
         embedded_subs = info.get("subtitles") or {}
         for lang_code, sub_list in embedded_subs.items():
             if sub_list and isinstance(sub_list, list):
-                first_sub = sub_list[0]
-                sub_url = first_sub.get("url") or ""
-                sub_ext = first_sub.get("ext") or "vtt"
-                if not sub_ext or len(sub_ext) > 5 or not sub_ext.isalnum() or sub_ext.lower() in ("unknown", "unknown_video"):
-                    sub_ext = "vtt"
-                sub_name = first_sub.get("name") or ""
-                skey = (lang_code.lower(), sub_ext.lower())
-                if skey not in seen_subs:
-                    seen_subs.add(skey)
-                    subtitles.append(
-                        SubtitleTrackOption(
-                            language=lang_code,
-                            name=sub_name,
-                            url=sub_url,
-                            ext=sub_ext,
-                            is_external=False,
-                            headers=headers,
+                for sub_item in sub_list:
+                    sub_url = sub_item.get("url") or ""
+                    sub_ext = sub_item.get("ext") or "vtt"
+                    if not sub_ext or len(sub_ext) > 5 or not sub_ext.isalnum() or sub_ext.lower() in ("unknown", "unknown_video"):
+                        sub_ext = "vtt"
+                    sub_name = sub_item.get("name") or ""
+                    skey = (lang_code.lower(), sub_name.lower(), sub_url)
+                    if skey not in seen_subs:
+                        seen_subs.add(skey)
+                        subtitles.append(
+                            SubtitleTrackOption(
+                                language=lang_code,
+                                name=sub_name,
+                                url=sub_url,
+                                ext=sub_ext,
+                                is_external=False,
+                                headers=headers,
+                            )
                         )
-                    )
 
-        if not subtitles and parsed_s:
-            subtitles = list(parsed_s)
-            seen_subs = {(st.language.lower(), st.ext.lower()) for st in subtitles}
-
-        # 2. Captured external subtitles (.vtt / .srt)
+        # 3. Captured external subtitles (.vtt / .srt)
+        known_sub_urls = {st.url.split("#")[0].lower() for st in subtitles if st.url}
         for ext_sub_url, ext_headers in captured_subtitles.items():
+            clean_ext_url = ext_sub_url.split("#")[0].lower()
+            if clean_ext_url in known_sub_urls or any(clean_ext_url in ku or ku in clean_ext_url for ku in known_sub_urls):
+                continue
             guess_lang = "und"
             lower_surl = ext_sub_url.lower()
             for common_l in ("en", "eng", "es", "spa", "fr", "de", "ja", "ko", "pt", "it", "ru", "hi", "zh"):
@@ -1339,19 +1455,39 @@ class UniversalMediaDownloader:
                     guess_lang = common_l
                     break
             ext = "srt" if ".srt" in lower_surl else "vtt"
-            skey = (guess_lang, ext, ext_sub_url)
+            raw_base = os.path.basename(urlparse(ext_sub_url).path)
+            if len(raw_base) > 30 or re.match(r"^[vV]\d+\.", raw_base):
+                clean_name = f"Track ({guess_lang.upper()})"
+            else:
+                clean_name = raw_base
+
+            skey = (guess_lang, clean_name.lower(), ext_sub_url)
             if skey not in seen_subs:
                 seen_subs.add(skey)
                 subtitles.append(
                     SubtitleTrackOption(
                         language=guess_lang,
-                        name=os.path.basename(urlparse(ext_sub_url).path),
+                        name=clean_name,
                         url=ext_sub_url,
                         ext=ext,
                         is_external=True,
                         headers=ext_headers,
                     )
                 )
+
+        is_trailer = False
+        lower_url = stream_url.lower()
+        if (
+            "imdb-video.media-imdb.com" in lower_url
+            or "trailers.wecollege" in lower_url
+            or bool(re.search(r"[/_-]trailer([/_-]|\.|$)", lower_url))
+            or "type=trailer" in lower_url
+            or (duration_s > 0 and duration_s < 240 and stype == "direct")
+            or bool(re.search(r"(trailer|teaser|preview)", title.lower()))
+        ):
+            is_trailer = True
+            if "[TRAILER]" not in title:
+                title = f"{title} [TRAILER]"
 
         return StreamCandidate(
             url=stream_url,
@@ -1361,6 +1497,7 @@ class UniversalMediaDownloader:
             page_url=page_url,
             is_drm=is_drm,
             drm_notice=drm_notice,
+            is_trailer=is_trailer,
             duration_s=duration_s,
             thumbnail=thumbnail,
             video_tracks=video_tracks,
@@ -1430,10 +1567,16 @@ class UniversalMediaDownloader:
                 fmt_str = f"{selected_format_id}+bestaudio/best"
             target_ext = output_format
         elif selected_resolution:
-            fmt_str = f"bestvideo[height<={selected_resolution}]+bestaudio/best[height<={selected_resolution}]/best"
+            if selected_audio_id:
+                fmt_str = f"bestvideo[height<={selected_resolution}]+{selected_audio_id}"
+            else:
+                fmt_str = f"bestvideo[height<={selected_resolution}]+bestaudio/best[height<={selected_resolution}]/best"
             target_ext = output_format
         else:
-            fmt_str = "bestvideo+bestaudio/best"
+            if selected_audio_id:
+                fmt_str = f"bestvideo+{selected_audio_id}"
+            else:
+                fmt_str = "bestvideo+bestaudio/best"
             target_ext = output_format
 
         outtmpl = os.path.join(out_dir, f"{base_name}.%(ext)s")
@@ -1449,9 +1592,11 @@ class UniversalMediaDownloader:
                 write_subs = True
                 sub_langs = selected_subtitles
 
-        # Setup Progress Hook with smooth monotonic percentage and rate limiting
+        # Setup Progress Hook with smooth monotonic percentage, multi-stream tracking, and rate limiting
         last_update = [0.0]
         last_pct = [0.0]
+        current_file = [""]
+        stream_label = [""]
 
         def ytdlp_hook(d: Dict[str, Any]):
             if not progress_cb:
@@ -1459,6 +1604,23 @@ class UniversalMediaDownloader:
             status = d.get("status")
             if status == "downloading":
                 now = time.time()
+                fn = d.get("filename") or ""
+                # Detect switch to a new stream (e.g. video finished, audio started)
+                if fn and fn != current_file[0]:
+                    current_file[0] = fn
+                    last_pct[0] = 0.0
+                    info_dict = d.get("info_dict") or {}
+                    vcodec = info_dict.get("vcodec")
+                    acodec = info_dict.get("acodec")
+                    res = info_dict.get("resolution") or (f"{info_dict.get('height')}p" if info_dict.get("height") else "")
+                    lang = info_dict.get("language") or info_dict.get("format_note") or ""
+                    if vcodec and vcodec != "none":
+                        stream_label[0] = f"Video {res}".strip()
+                    elif acodec and acodec != "none":
+                        stream_label[0] = f"Audio {lang.upper()}".strip() if lang else "Audio"
+                    else:
+                        stream_label[0] = "Stream"
+
                 downloaded = d.get("downloaded_bytes") or 0
                 speed = d.get("speed") or 0
                 eta = d.get("eta") or 0
@@ -1491,6 +1653,7 @@ class UniversalMediaDownloader:
 
                 progress_cb({
                     "status": "downloading",
+                    "label": stream_label[0],
                     "percent": round(pct, 1),
                     "downloaded": downloaded,
                     "total": total or (downloaded if pct >= 100 else 0),
@@ -1502,10 +1665,11 @@ class UniversalMediaDownloader:
                     "eta_str": format_duration(eta) if (eta and eta < 86400) else "--:--",
                 })
             elif status == "finished":
+                lbl = stream_label[0] or "Track"
                 progress_cb({
-                    "status": "muxing",
-                    "percent": 99.0,
-                    "message": "Stream downloaded. Muxing video, audio, and subtitle tracks with FFmpeg...",
+                    "status": "track_finished",
+                    "percent": 100.0,
+                    "message": f"{lbl} downloaded.",
                 })
 
         postprocessors = [{"key": "FFmpegMetadata"}]
@@ -1530,6 +1694,8 @@ class UniversalMediaDownloader:
         elif "referer" in sanitized_headers:
             ref_val = sanitized_headers.pop("referer").split("#")[0]
             sanitized_headers["Referer"] = ref_val
+        elif candidate.page_url:
+            sanitized_headers["Referer"] = candidate.page_url.split("#")[0]
 
         if "Referer" in sanitized_headers and "Origin" not in sanitized_headers and "origin" not in sanitized_headers:
             try:
@@ -1546,9 +1712,10 @@ class UniversalMediaDownloader:
             "outtmpl": outtmpl,
             "merge_output_format": target_ext,
             "concurrent_fragment_downloads": 4,
-            "socket_timeout": 15,
-            "fragment_retries": 15,
-            "retries": 10,
+            "socket_timeout": 30,
+            "fragment_retries": 25,
+            "retries": 50,
+            "continuedl": True,
             "file_access_retries": 3,
             "enable_file_urls": True,
             "hls_prefer_native": True,
@@ -1558,6 +1725,11 @@ class UniversalMediaDownloader:
             "progress_hooks": [ytdlp_hook],
             "postprocessors": postprocessors,
         }
+        if HAVE_IMPERSONATE:
+            try:
+                ydl_opts["impersonate"] = ImpersonateTarget("chrome")
+            except Exception:
+                pass
         if cookiefile_path:
             ydl_opts["cookiefile"] = cookiefile_path
 
@@ -1613,8 +1785,107 @@ class UniversalMediaDownloader:
                         elif os.path.exists(raw_dest):
                             final_file = raw_dest
             except Exception as e:
-                logger.error(f"Universal download failed: {e}")
-                return False, f"Download failed: {e}"
+                err_str = str(e)
+                recovered = False
+
+                # Handle network cut / offline state: wait and resume with partial progress
+                if is_network_error(e) or not is_internet_available():
+                    if progress_cb:
+                        progress_cb({
+                            "status": "paused_offline",
+                            "message": "⚠️ Internet connection lost! Download paused. Waiting to reconnect...",
+                        })
+                    wait_for_internet_connection(
+                        status_callback=lambda msg: progress_cb({"status": "paused_offline", "message": msg}) if progress_cb else None,
+                        task_name=candidate.title[:30]
+                    )
+                    try:
+                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                            info = ydl.extract_info(target_download_url, download=True)
+                            if info:
+                                raw_dest = ydl.prepare_filename(info)
+                                dest_no_ext, _ = os.path.splitext(raw_dest)
+                                candidate_dest = f"{dest_no_ext}.{target_ext}"
+                                if os.path.exists(candidate_dest):
+                                    final_file = candidate_dest
+                                elif os.path.exists(raw_dest):
+                                    final_file = raw_dest
+                                recovered = True
+                    except Exception as e_net_retry:
+                        logger.warning(f"yt-dlp resumption after reconnect notice: {e_net_retry}")
+
+                # Retry 1: 403 Forbidden -> toggle impersonate and ensure headers
+                if ("403" in err_str or "Forbidden" in err_str):
+                    logger.info("403 Forbidden detected. Adjusting client TLS fingerprint & headers...")
+                    if "impersonate" in ydl_opts:
+                        ydl_opts.pop("impersonate", None)
+                    elif HAVE_IMPERSONATE:
+                        ydl_opts["impersonate"] = ImpersonateTarget("chrome")
+
+                    if candidate.page_url and "Referer" not in ydl_opts.get("http_headers", {}):
+                        if "http_headers" not in ydl_opts:
+                            ydl_opts["http_headers"] = {}
+                        ydl_opts["http_headers"]["Referer"] = candidate.page_url.split("#")[0]
+                        p_ref = urlparse(candidate.page_url)
+                        ydl_opts["http_headers"]["Origin"] = f"{p_ref.scheme}://{p_ref.netloc}"
+
+                    try:
+                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                            info = ydl.extract_info(target_download_url, download=True)
+                            if info:
+                                raw_dest = ydl.prepare_filename(info)
+                                dest_no_ext, _ = os.path.splitext(raw_dest)
+                                candidate_dest = f"{dest_no_ext}.{target_ext}"
+                                if os.path.exists(candidate_dest):
+                                    final_file = candidate_dest
+                                elif os.path.exists(raw_dest):
+                                    final_file = raw_dest
+                                recovered = True
+                    except Exception as e_retry:
+                        logger.warning(f"yt-dlp 403 retry error: {e_retry}")
+                # Retry 2: curl: (28) stall -> retry without impersonate, single fragment download
+                elif ("curl: (28)" in err_str or "Operation too slow" in err_str) and "impersonate" in ydl_opts:
+                    logger.warning("curl stall detected. Retrying with native HTTP client...")
+                    ydl_opts.pop("impersonate", None)
+                    ydl_opts["concurrent_fragment_downloads"] = 1
+                    try:
+                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                            info = ydl.extract_info(target_download_url, download=True)
+                            if info:
+                                raw_dest = ydl.prepare_filename(info)
+                                dest_no_ext, _ = os.path.splitext(raw_dest)
+                                candidate_dest = f"{dest_no_ext}.{target_ext}"
+                                if os.path.exists(candidate_dest):
+                                    final_file = candidate_dest
+                                elif os.path.exists(raw_dest):
+                                    final_file = raw_dest
+                                recovered = True
+                    except Exception as e_retry2:
+                        logger.warning(f"yt-dlp stall retry error: {e_retry2}")
+
+                # Retry 3: Fallback direct fragment download if media_manifests or manifest_content available
+                if not recovered and (candidate.media_manifests or candidate.manifest_content):
+                    logger.info("Attempting fallback direct multithreaded fragment download...")
+                    try:
+                        success, res = self._download_unscrambled_hls(
+                            candidate=candidate,
+                            selected_resolution=selected_resolution,
+                            selected_format_id=selected_format_id,
+                            selected_audio_id=selected_audio_id,
+                            audio_only=audio_only,
+                            selected_subtitles=selected_subtitles,
+                            output_format=output_format,
+                            out_dir=out_dir,
+                            progress_cb=progress_cb,
+                        )
+                        if success:
+                            return True, res
+                    except Exception as e_frag:
+                        logger.error(f"Fallback fragment download error: {e_frag}")
+
+                if not recovered and not final_file:
+                    logger.error(f"Universal download failed: {e}")
+                    return False, f"Download failed: {e}"
 
             # If final_file still not identified, search output_dir for newest file matching base_name
             if not final_file or not os.path.exists(final_file):
@@ -1759,10 +2030,16 @@ class UniversalMediaDownloader:
 
         temp_ts = os.path.join(dest_dir, f"temp_{int(time.time())}_{uuid.uuid4().hex[:6]}.ts")
 
-        # Worker for segment fetch & unscramble
+        net_pause_event = threading.Event()
+        net_pause_event.set()
+
+        # Worker for segment fetch & unscramble with offline auto-pause/resumption
         def fetch_segment(idx: int, url: str) -> Tuple[int, bytearray]:
-            for attempt in range(3):
+            attempt = 0
+            while True:
+                attempt += 1
                 try:
+                    net_pause_event.wait()
                     try:
                         from curl_cffi import requests as cffi_requests
                         r = cffi_requests.get(url, headers=sanitized_headers, impersonate="chrome", timeout=15)
@@ -1780,9 +2057,32 @@ class UniversalMediaDownloader:
                             for i in range(min(seg_bytes, len(data))):
                                 data[i] ^= keystream[i]
                         return idx, data
-                except Exception:
-                    time.sleep(0.5)
-            raise RuntimeError(f"Failed to download fragment {idx} from {url}")
+                    elif r.status_code in (403, 404):
+                        if attempt >= 5:
+                            raise RuntimeError(f"HTTP {r.status_code} on fragment {idx}")
+                    else:
+                        time.sleep(0.5)
+                except Exception as e:
+                    if is_network_error(e) or not is_internet_available():
+                        if net_pause_event.is_set():
+                            net_pause_event.clear()
+                            if progress_cb:
+                                progress_cb({
+                                    "status": "paused_offline",
+                                    "message": "⚠️ Internet lost! Download paused... Waiting for connection.",
+                                })
+                            wait_for_internet_connection(
+                                status_callback=lambda msg: progress_cb({"status": "paused_offline", "message": msg}) if progress_cb else None,
+                                task_name=f"Fragment {idx}"
+                            )
+                            net_pause_event.set()
+                        else:
+                            net_pause_event.wait()
+                        continue
+
+                    if attempt >= 5:
+                        raise RuntimeError(f"Failed to download fragment {idx} from {url}: {e}")
+                time.sleep(0.5)
 
         downloaded_bytes = 0
         completed_count = 0
@@ -2049,12 +2349,13 @@ class UniversalMediaDownloader:
                         lang_part = parts[-2].lower()
                         downloaded_vtt_files[lang_part] = os.path.join(out_dir, fname)
 
+            has_numeric_selection = any(s.isdigit() for s in selected_subtitles)
             for idx, st in enumerate(candidate.subtitles):
                 is_selected = (
                     "all" in [s.lower() for s in selected_subtitles]
-                    or (st.language and st.language.lower() in [s.lower() for s in selected_subtitles])
                     or str(idx + 1) in selected_subtitles
                     or str(idx) in selected_subtitles
+                    or (not has_numeric_selection and st.language and st.language.lower() in [s.lower() for s in selected_subtitles])
                 )
                 if not is_selected:
                     continue
@@ -2067,7 +2368,7 @@ class UniversalMediaDownloader:
                 # 1. Did yt-dlp already save this file to disk?
                 existing_file = downloaded_vtt_files.get(lang)
                 if existing_file and os.path.exists(existing_file) and os.path.getsize(existing_file) > 100:
-                    sub_options_to_add.append((existing_file, lang))
+                    sub_options_to_add.append((existing_file, lang, st.name))
                     continue
 
                 # 2. Otherwise download it directly
@@ -2076,7 +2377,7 @@ class UniversalMediaDownloader:
                     st.headers = candidate.headers
                 base_ref = candidate.url or candidate.page_url
                 if self._fetch_subtitle_file(st, target_sub_path, base_url=base_ref):
-                    sub_options_to_add.append((target_sub_path, lang))
+                    sub_options_to_add.append((target_sub_path, lang, st.name))
 
             if not sub_options_to_add:
                 return media_filepath
@@ -2085,7 +2386,7 @@ class UniversalMediaDownloader:
             base, ext = os.path.splitext(media_filepath)
             out_muxed = f"{base}_muxed{ext}"
             cmd = ["ffmpeg", "-y", "-i", media_filepath]
-            for sp, _ in sub_options_to_add:
+            for sp, _, _ in sub_options_to_add:
                 cmd.extend(["-i", sp])
 
             cmd.extend(["-map", "0"])
@@ -2097,8 +2398,11 @@ class UniversalMediaDownloader:
             else:
                 cmd.extend(["-c", "copy"])
 
-            for i, (_, l) in enumerate(sub_options_to_add):
-                cmd.extend([f"-metadata:s:s:{len(existing_sub_langs) + i}", f"language={l}"])
+            for i, (_, l, s_title) in enumerate(sub_options_to_add):
+                s_idx = len(existing_sub_langs) + i
+                cmd.extend([f"-metadata:s:s:{s_idx}", f"language={l}"])
+                if s_title:
+                    cmd.extend([f"-metadata:s:s:{s_idx}", f"title={s_title}"])
 
             cmd.append(out_muxed)
             logger.info(f"Running subtitle mux command: {' '.join(cmd)}")
@@ -2106,7 +2410,8 @@ class UniversalMediaDownloader:
             if res.returncode == 0 and os.path.exists(out_muxed) and os.path.getsize(out_muxed) > 1000:
                 os.replace(out_muxed, media_filepath)
                 # Clean up any leftover vtt files matching the base title
-                for sp, _ in sub_options_to_add:
+                for item in sub_options_to_add:
+                    sp = item[0]
                     if sp.startswith(out_dir) and os.path.exists(sp):
                         try:
                             os.remove(sp)
@@ -2214,15 +2519,21 @@ class UniversalMediaDownloader:
         else:
             print("\n  [i] Single combined video stream available.")
 
-        # 2. Audio Track Selection (if multiple audio renditions present)
+        # 2. Audio Track Selection (if audio renditions present)
         sel_audio_id: Optional[str] = None
-        if not audio_only and len(candidate.audio_tracks) > 1:
-            print("\nAvailable Audio Renditions:")
-            for idx, at in enumerate(candidate.audio_tracks, 1):
-                print(f"  [{idx}] {at.display_label}")
-            a_choice = input(f"Select audio track [1-{len(candidate.audio_tracks)}] (Default 1): ").strip()
-            if a_choice.isdigit() and 1 <= int(a_choice) <= len(candidate.audio_tracks):
-                sel_audio_id = candidate.audio_tracks[int(a_choice) - 1].format_id
+        if not audio_only and candidate.audio_tracks:
+            # If multiple tracks or single named track, offer choice
+            if len(candidate.audio_tracks) > 1:
+                print("\nAvailable Audio Renditions:")
+                for idx, at in enumerate(candidate.audio_tracks, 1):
+                    print(f"  [{idx}] {at.display_label}")
+                a_choice = input(f"Select audio track [1-{len(candidate.audio_tracks)}] (Default 1): ").strip()
+                if a_choice.isdigit() and 1 <= int(a_choice) <= len(candidate.audio_tracks):
+                    sel_audio_id = candidate.audio_tracks[int(a_choice) - 1].format_id
+                else:
+                    sel_audio_id = candidate.audio_tracks[0].format_id
+            else:
+                sel_audio_id = candidate.audio_tracks[0].format_id
 
         # 3. Subtitles Selection
         selected_subs: List[str] = []
@@ -2239,7 +2550,7 @@ class UniversalMediaDownloader:
                 for part in sub_choice.split(","):
                     p = part.strip()
                     if p.isdigit() and 1 <= int(p) <= len(candidate.subtitles):
-                        selected_subs.append(candidate.subtitles[int(p) - 1].language)
+                        selected_subs.append(str(p))
 
         # 4. Output Container
         out_fmt = "mkv"
@@ -2251,10 +2562,26 @@ class UniversalMediaDownloader:
         print("\n[*] Starting download and muxing...")
 
         def print_dl_progress(p: Dict[str, Any]):
+            try:
+                cols = shutil.get_terminal_size((80, 20)).columns
+            except Exception:
+                cols = 80
+            max_w = max(50, cols - 1)
+
             status = p.get("status")
             if status == "downloading":
                 pct = min(100.0, max(0.0, float(p.get("percent") or 0.0)))
-                bar_len = 24
+                lbl = p.get("label") or ""
+                lbl_tag = f"[{lbl}] " if lbl else ""
+
+                speed_val = p.get("speed_str") or "0 B/s"
+                eta_val = p.get("eta_str") or "--:--"
+                dl_str = p.get("downloaded_str") or "0 B"
+                tot_str = p.get("total_str") or "0 B"
+
+                # Calculate space remaining for progress bar
+                fixed_len = len(lbl_tag) + 2 + 8 + 3 + len(dl_str) + 1 + len(tot_str) + 3 + len(speed_val) + 3 + 5 + len(eta_val) + 4
+                bar_len = max(8, min(24, max_w - fixed_len))
                 filled = int(round(bar_len * pct / 100.0))
                 filled = min(bar_len, max(0, filled))
                 if filled == bar_len:
@@ -2264,20 +2591,17 @@ class UniversalMediaDownloader:
                 else:
                     bar = " " * bar_len
 
-                speed_val = p.get("speed_str") or "0 B/s"
-                speed_str = f"{speed_val:>11}"
-                eta_val = p.get("eta_str") or "--:--"
-                eta_str = f"{eta_val:<6}"
-                dl_str = (p.get("downloaded_str") or "0 B").rjust(10)
-                tot_str = (p.get("total_str") or "0 B").ljust(10)
-                dl_tot = f"{dl_str} / {tot_str}"
-                line = f"  [{bar}] {pct:5.1f}% | {dl_tot} | {speed_str} | ETA: {eta_str}"
-                sys.stdout.write(f"\r{line.ljust(95)}")
+                line = f"  {lbl_tag}[{bar}] {pct:5.1f}% | {dl_str}/{tot_str} | {speed_val} | ETA: {eta_val}"
+                sys.stdout.write(f"\r{line[:max_w].ljust(max_w)}")
                 sys.stdout.flush()
             elif status == "starting":
                 print(f"  -> {p.get('message', 'Starting download...')}")
+            elif status == "track_finished":
+                sys.stdout.write(f"\r{' ' * max_w}\r")
+                sys.stdout.flush()
+                print(f"  ✓ {p.get('message', 'Track downloaded.')}")
             elif status == "muxing":
-                sys.stdout.write("\r" + " " * 95 + "\r")
+                sys.stdout.write(f"\r{' ' * max_w}\r")
                 sys.stdout.flush()
                 print(f"  [FFmpeg] {p.get('message', 'Muxing tracks...')}")
 

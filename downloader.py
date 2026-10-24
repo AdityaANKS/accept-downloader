@@ -124,7 +124,8 @@ from utils import (
     sanitize_filename, format_size, format_duration,
     check_ffmpeg, get_free_space_mb, find_file,
     clear_screen, get_logger, ensure_directory,
-    ProgressTracker, is_valid_url
+    ProgressTracker, is_valid_url,
+    is_internet_available, is_network_error, wait_for_internet_connection
 )
 UTILS_AVAILABLE = True
 
@@ -264,18 +265,41 @@ class DownloadProgressHook:
             self.filename = d.get('filename', '')
             self.status = 'downloading'
             
+            fi = d.get('fragment_index')
+            fc = d.get('fragment_count')
             if self.total > 0:
                 pct = (self.downloaded / self.total) * 100
-                bar_len = 40
-                filled = int(bar_len * pct / 100)
-                bar = '█' * filled + '░' * (bar_len - filled)
-                
-                speed_str = format_size(self.speed) + "/s" if self.speed else "---"
-                eta_str = format_duration(self.eta) if self.eta else "--:--"
                 dl_str = format_size(self.downloaded)
                 total_str = format_size(self.total)
-                
-                print(f"\r  [{bar}] {pct:5.1f}% | {dl_str}/{total_str} | {speed_str} | ETA: {eta_str}  ", end='', flush=True)
+            elif fc and fi and fc > 0:
+                pct = (fi / fc) * 100
+                if self.downloaded > 0 and fi > 0:
+                    est_total = int((self.downloaded / fi) * fc)
+                    total_str = format_size(est_total)
+                else:
+                    total_str = f"frag {fc}"
+                dl_str = format_size(self.downloaded) if self.downloaded > 0 else f"frag {fi}"
+            else:
+                pct = 0
+                dl_str = format_size(self.downloaded)
+                total_str = "---"
+
+            try:
+                cols = shutil.get_terminal_size((80, 20)).columns
+            except Exception:
+                cols = 80
+            max_w = max(50, cols - 1)
+
+            speed_str = format_size(self.speed) + "/s" if self.speed else "---"
+            eta_str = format_duration(self.eta) if self.eta else "--:--"
+            fixed_len = 5 + 8 + 3 + len(dl_str) + 1 + len(total_str) + 3 + len(speed_str) + 3 + 5 + len(eta_str) + 2
+            bar_len = max(8, min(30, max_w - fixed_len))
+            pct = min(100.0, max(0.0, pct))
+            filled = int(bar_len * pct / 100)
+            bar = '█' * filled + '░' * (bar_len - filled)
+            
+            line = f"  [{bar}] {pct:5.1f}% | {dl_str}/{total_str} | {speed_str} | ETA: {eta_str}"
+            print(f"\r{line[:max_w].ljust(max_w)}", end='', flush=True)
         
         elif status == 'finished':
             self.status = 'finished'
@@ -667,8 +691,9 @@ class MediaDownloader:
             'quiet': True,
             'no_warnings': True,
             'noprogress': True,
-            'retries': 10,
-            'fragment_retries': 10,
+            'retries': 20,
+            'fragment_retries': 50,
+            'continuedl': True,
             'socket_timeout': 30,
             'http_chunk_size': 10485760,
             'overwrites': False,
@@ -1225,11 +1250,12 @@ class MediaDownloader:
             'quiet': True,
             'no_warnings': True,
             'noplaylist': True,
-            'retries': 3,
-            'socket_timeout': 10,  # FAST 10 second timeout
+            'retries': 20,
+            'fragment_retries': 50,
+            'continuedl': True,
+            'socket_timeout': 15,
             'extractor_retries': 1,
             'file_access_retries': 1,
-            'fragment_retries': 3,
             'overwrites': False,
             'windowsfilenames': True,
             'geo_bypass': True,
@@ -1344,36 +1370,43 @@ class MediaDownloader:
         download_opts['logger'] = archive_logger
         
         print("  Downloading...")
-        try:
-            with yt_dlp.YoutubeDL(download_opts) as ydl:
-                ydl.download([url])
-        except Exception as e:
-            err = str(e).lower()
-            if "requested format is not available" in err or "no video formats found" in err:
-                if self.ml:
-                    self.ml.log_error("fallback", url, reason="format_unavail", q=quality)
-                print("  Format unavailable, retrying with best available...")
-                fallback_opts = download_opts.copy()
-                fallback_opts['format'] = 'bestvideo+bestaudio/best'
-                with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+        while True:
+            try:
+                with yt_dlp.YoutubeDL(download_opts) as ydl:
                     ydl.download([url])
-            elif 'subtitle' in err or '429' in err:
-                print("  Subtitle download failed (rate limited), retrying without subtitles...")
-                fallback_opts = download_opts.copy()
-                fallback_opts.pop('writesubtitles', None)
-                fallback_opts.pop('writeautomaticsub', None)
-                fallback_opts.pop('subtitleslangs', None)
-                fallback_opts.pop('subtitlesformat', None)
-                # Strip subtitle-related postprocessors so the retry doesn't hit the same error
-                if 'postprocessors' in fallback_opts:
-                    fallback_opts['postprocessors'] = [
-                        pp for pp in fallback_opts['postprocessors']
-                        if pp.get('key') not in ('FFmpegSubtitlesConvertor', 'FFmpegEmbedSubtitle')
-                    ]
-                with yt_dlp.YoutubeDL(fallback_opts) as ydl:
-                    ydl.download([url])
-            else:
-                raise
+                break
+            except Exception as e:
+                if is_network_error(e) or not is_internet_available():
+                    wait_for_internet_connection(task_name=title[:30])
+                    continue
+                err = str(e).lower()
+                if "requested format is not available" in err or "no video formats found" in err:
+                    if self.ml:
+                        self.ml.log_error("fallback", url, reason="format_unavail", q=quality)
+                    print("  Format unavailable, retrying with best available...")
+                    fallback_opts = download_opts.copy()
+                    fallback_opts['format'] = 'bestvideo+bestaudio/best'
+                    with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                        ydl.download([url])
+                    break
+                elif 'subtitle' in err or '429' in err:
+                    print("  Subtitle download failed (rate limited), retrying without subtitles...")
+                    fallback_opts = download_opts.copy()
+                    fallback_opts.pop('writesubtitles', None)
+                    fallback_opts.pop('writeautomaticsub', None)
+                    fallback_opts.pop('subtitleslangs', None)
+                    fallback_opts.pop('subtitlesformat', None)
+                    # Strip subtitle-related postprocessors so the retry doesn't hit the same error
+                    if 'postprocessors' in fallback_opts:
+                        fallback_opts['postprocessors'] = [
+                            pp for pp in fallback_opts['postprocessors']
+                            if pp.get('key') not in ('FFmpegSubtitlesConvertor', 'FFmpegEmbedSubtitle')
+                        ]
+                    with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                        ydl.download([url])
+                    break
+                else:
+                    raise
         
         # Check if video was skipped due to archive
         if archive_logger.skipped:
@@ -1481,8 +1514,10 @@ class MediaDownloader:
             'quiet': True,
             'no_warnings': True,
             'noplaylist': True,
-            'socket_timeout': 10,
-            'retries': 3,
+            'socket_timeout': 15,
+            'retries': 20,
+            'fragment_retries': 50,
+            'continuedl': True,
             'format': 'bestaudio/best',
             'windowsfilenames': True,
             'geo_bypass': True,
@@ -1544,33 +1579,41 @@ class MediaDownloader:
         working_opts['logger'] = archive_logger
 
         print("  Downloading...")
-        try:
-            with yt_dlp.YoutubeDL(working_opts) as ydl:
-                ydl.download([url])
-        except Exception as e:
-            err = str(e).lower()
-            if "requested format is not available" in err or "no video formats" in err:
-                print("  Format unavailable, retrying with best available...")
-                fallback_opts = working_opts.copy()
-                fallback_opts['format'] = 'bestaudio/best'
-                fallback_opts.pop('extractor_args', None)
-                try:
-                    with yt_dlp.YoutubeDL(fallback_opts) as ydl:
-                        ydl.download([url])
-                except Exception as e2:
-                    print(f"  ⚠ Download error: {e2}")
-            elif "403" in err or "forbidden" in err:
-                print("  HTTP 403, retrying with fallback format...")
-                fallback_opts = working_opts.copy()
-                fallback_opts['format'] = 'best'
-                fallback_opts.pop('extractor_args', None)
-                try:
-                    with yt_dlp.YoutubeDL(fallback_opts) as ydl:
-                        ydl.download([url])
-                except Exception as e2:
-                    print(f"  ⚠ Download error: {e2}")
-            else:
-                print(f"  ⚠ Download error: {e}")
+        while True:
+            try:
+                with yt_dlp.YoutubeDL(working_opts) as ydl:
+                    ydl.download([url])
+                break
+            except Exception as e:
+                if is_network_error(e) or not is_internet_available():
+                    wait_for_internet_connection(task_name=title[:30])
+                    continue
+                err = str(e).lower()
+                if "requested format is not available" in err or "no video formats" in err:
+                    print("  Format unavailable, retrying with best available...")
+                    fallback_opts = working_opts.copy()
+                    fallback_opts['format'] = 'bestaudio/best'
+                    fallback_opts.pop('extractor_args', None)
+                    try:
+                        with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                            ydl.download([url])
+                    except Exception as e2:
+                        print(f"  ⚠ Download error: {e2}")
+                    break
+                elif "403" in err or "forbidden" in err:
+                    print("  HTTP 403, retrying with fallback format...")
+                    fallback_opts = working_opts.copy()
+                    fallback_opts['format'] = 'best'
+                    fallback_opts.pop('extractor_args', None)
+                    try:
+                        with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                            ydl.download([url])
+                    except Exception as e2:
+                        print(f"  ⚠ Download error: {e2}")
+                    break
+                else:
+                    print(f"  ⚠ Download error: {e}")
+                    break
         
         if archive_logger.skipped:
             existing_fp = None
@@ -1837,8 +1880,9 @@ class MediaDownloader:
                 'quiet': True,
                 'no_warnings': True,
                 'noplaylist': True,
-                'retries': 3,
-                'fragment_retries': 3,
+                'retries': 20,
+                'fragment_retries': 50,
+                'continuedl': True,
                 'socket_timeout': 15,
                 'overwrites': False,
                 'windowsfilenames': True,
@@ -1904,6 +1948,10 @@ class MediaDownloader:
                     print(f"\r  ⚠  Interrupted by user!                                                ")
                     break
                 except Exception as e:
+                    if is_network_error(e) or not is_internet_available():
+                        _print_playlist_line(idx, total, '⏸', video_title, 'offline (paused)...', elapsed, end='')
+                        wait_for_internet_connection(task_name=f"Playlist item [{idx+1}/{total}] {video_title[:25]}")
+                        continue
                     err_msg = str(e)
                     last_error = err_msg
                     err_lower = err_msg.lower()

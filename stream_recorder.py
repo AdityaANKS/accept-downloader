@@ -36,7 +36,7 @@ from config import Config as _Cfg
 _TEMP_DIR = _Cfg.TEMP_DIR
 _VIDEO_DIR = _Cfg.VIDEO_DIR
 
-from utils import format_size, format_duration, sanitize_filename, get_logger, check_ffmpeg
+from utils import format_size, format_duration, sanitize_filename, get_logger, check_ffmpeg, is_internet_available, is_network_error, wait_for_internet_connection
 
 logger = get_logger()
 
@@ -478,6 +478,12 @@ class M3U8Downloader:
                     future.result()
                     downloaded += 1
                 except Exception as e:
+                    if is_network_error(e) or not is_internet_available():
+                        logger.warning(f"Network error on segment {seg.index}: {e}. Pausing...")
+                        wait_for_internet_connection(task_name=f"Segment {seg.index}", stop_event=self._stop_event)
+                        new_fut = pool.submit(self._download_segment, seg, os.path.join(temp_dir, f"seg_{seg.index:06d}.ts"), headers)
+                        futures[new_fut] = seg
+                        continue
                     failed += 1
                     logger.warning(f"Segment {seg.index} failed: {e}")
                 
