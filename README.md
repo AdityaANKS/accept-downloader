@@ -1,5 +1,7 @@
 # Personal Media Downloader
 
+<img width="1774" height="887" alt="Accept Downloader_ Open-Source Workspace" src="https://github.com/user-attachments/assets/f5305928-c2a0-4e97-b384-546b83e60dcd" />
+
 A modern, high-performance **media & lossless music download manager** with both an interactive **CLI menu** and a rich **Web Dashboard**. Downloads videos, audio, playlists, synchronized lyrics, and multi-track streams from 1000+ platforms — plus a headless Playwright sniffer for downloading video, audio, and subtitles from any website or embedded player.
 
 Built on top of [yt-dlp](https://github.com/yt-dlp/yt-dlp), with native integration for **SpotiFLAC lossless music extraction** and **Playwright-powered media stream sniffing**.
