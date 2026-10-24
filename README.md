@@ -10,7 +10,7 @@ Built on top of [yt-dlp](https://github.com/yt-dlp/yt-dlp), with native integrat
 
 ### 🌐 Universal Webpage Media & Stream Sniffer (Option 24 / Web Sniffer Tab)
 - **Effortless "Paste Any URL & Download"** — downloads video, audio, and subtitle tracks from **any webpage URL**, including complex sites with embedded or iframe players.
-- **⚡ Fast Site Recipe & API Synthesizer (Reverse-Engineered)** — incorporates principles from `reverse-engineer-anything` and `api-anything`. Known platforms (e.g. Movy.sx, Vidy.st, Ani.pm) bypass the 15-second Playwright headless browser startup and resolve streams via direct API queries in < 500ms.
+- **⚡ Fast Site Recipe & API Synthesizer (Reverse-Engineered)** — incorporates principles from `reverse-engineer-anything` and `api-anything`. Known platforms (e.g. Movy.sx, Vidy.st.) bypass the 15-second Playwright headless browser startup and resolve streams via direct API queries in < 500ms.
 - **Client-Side Stream Cipher Decryption** — pure-Python implementation of reverse-engineered Murmur-style bit mixers and XOR PRNG keystream decoders (e.g. WeCollege/Miami sources).
 - **Trailer Detection & Deprioritization** — automatically identifies and separates movie trailers/previews from the real feature film or TV episode, ensuring the main stream is always Candidate [0].
 - **Headless Playwright Discovery & Self-Healing** — for un-cached or novel sites, automatically inspects DOM trees, traverses nested `<iframe>` players, dismisses intrusive popups, and triggers HTML5/JWPlayer/Video.js instances. Automatically compiles and caches new API patterns in `site_recipes.json`.
